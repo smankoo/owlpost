@@ -43,11 +43,27 @@ search, follow conversations, and send mail.
 
 ## Install
 
+The recommended way is to **not install at all** — let
+[`uvx`](https://docs.astral.sh/uv/guides/tools/) fetch and cache it on first
+use. This keeps the package always up-to-date and avoids polluting your
+global Python environment:
+
 ```bash
-pip install owlpost
-# or with uv:
-uv tool install owlpost
+# Run directly — uvx fetches from PyPI and caches.
+uvx --from owlpost owlpost
 ```
+
+If you'd rather have a stable binary on your `PATH`:
+
+```bash
+# Persistent install with uv (recommended)
+uv tool install owlpost
+
+# Or plain pip
+pip install owlpost
+```
+
+Either way you'll end up with an `owlpost` command that speaks MCP over stdio.
 
 ## Configure
 
@@ -85,7 +101,28 @@ variable.
 
 ## Use with Claude Code
 
-Add to `~/.claude.json` under `mcpServers`:
+Add to `~/.claude.json` under `mcpServers`. The `uvx` form is recommended —
+it fetches owlpost from PyPI on first launch, caches it, and keeps you on
+the latest version with no manual install step:
+
+```json
+{
+  "mcpServers": {
+    "owlpost": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "owlpost", "owlpost"],
+      "env": {}
+    }
+  }
+}
+```
+
+If `uvx` isn't on Claude Code's `PATH` you may need to use the absolute
+path (typically `~/.local/bin/uvx`).
+
+Alternatively, if you installed with `uv tool install owlpost` or
+`pip install owlpost`, point `command` directly at the resulting binary:
 
 ```json
 {
@@ -100,9 +137,6 @@ Add to `~/.claude.json` under `mcpServers`:
 }
 ```
 
-Or, if you installed with `uv tool install`, the binary will be at
-`~/.local/bin/owlpost`.
-
 Restart Claude Code and the tools will appear under the `owlpost` namespace.
 
 ## Use with Claude Desktop
@@ -113,7 +147,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "owlpost": {
-      "command": "owlpost"
+      "command": "uvx",
+      "args": ["--from", "owlpost", "owlpost"]
     }
   }
 }
@@ -122,7 +157,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ## Use with other MCP clients
 
 owlpost speaks the standard MCP stdio transport — any MCP-compatible client
-can talk to it by spawning the `owlpost` binary.
+can talk to it by spawning either `uvx --from owlpost owlpost` or, if
+installed, the bare `owlpost` binary.
 
 ## Examples
 
