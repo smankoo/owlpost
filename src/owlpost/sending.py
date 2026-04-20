@@ -66,6 +66,61 @@ def _build_message(
     return msg
 
 
+def _append_to_drafts(account: Account, msg: EmailMessage) -> str:
+    with account.imap() as c:
+        drafts = resolve_role(c, "drafts")
+        if not drafts:
+            raise RuntimeError("No Drafts folder found for this account")
+        typ, data = c.append(
+            quote_mailbox(drafts),
+            "\\Draft",
+            imaplib.Time2Internaldate(time.time()),
+            msg.as_bytes(),
+        )
+        if typ != "OK":
+            raise RuntimeError(f"APPEND to {drafts} failed: {data!r}")
+        return drafts
+
+
+def save_draft(
+    account: Account,
+    *,
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    html: str | None = None,
+    attachments: list[str] | None = None,
+    in_reply_to: str | None = None,
+    references: list[str] | None = None,
+) -> dict:
+    """Build a message and APPEND it to the account's Drafts folder. Nothing is sent."""
+    msg = _build_message(
+        from_addr=account.cfg.email,
+        to=to,
+        cc=cc,
+        bcc=bcc,
+        subject=subject,
+        body=body,
+        html=html,
+        attachments=attachments,
+        in_reply_to=in_reply_to,
+        references=references,
+    )
+    saved_to = _append_to_drafts(account, msg)
+    return {
+        "message_id": msg["Message-ID"],
+        "from": account.cfg.email,
+        "to": to,
+        "cc": cc or [],
+        "bcc": bcc or [],
+        "subject": subject,
+        "saved_to_folder": saved_to,
+        "size_bytes": len(msg.as_bytes()),
+    }
+
+
 def _append_to_sent(account: Account, msg: EmailMessage) -> str | None:
     if not account.cfg.auto_save_sent:
         return None

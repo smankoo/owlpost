@@ -34,6 +34,7 @@ search, follow conversations, and send mail.
 | `save_attachment` | Download an attachment to disk by part index |
 | `get_conversation` | Return all messages in the same thread (Gmail X-GM-THRID or generic reference walking) |
 | `send_email` | Send mail. Auto-saves to Sent on providers that don't (e.g. iCloud). Supports attachments, threading headers |
+| `save_draft_email` | Build a message and APPEND it to Drafts without sending — same parameters as `send_email` |
 | `reply_email` | Reply (with optional reply-all), preserving threading and quoting |
 | `forward_email` | Forward, re-attaching original attachments by default |
 | `mark_read` | Set/unset `\Seen` |
@@ -218,6 +219,30 @@ Run the server directly to verify it starts:
 .venv/bin/owlpost
 # (waits for MCP stdio input)
 ```
+
+## Publishing
+
+Releases go to [PyPI](https://pypi.org/project/owlpost/). From a clean tree
+on `main`:
+
+```bash
+# 1. Bump version in pyproject.toml
+# 2. Commit the bump
+# 3. Build the sdist + wheel
+uv build
+
+# 4. Upload to PyPI (requires ~/.pypirc with an API token)
+uv publish
+
+# 5. Tag and push
+git tag v0.1.x
+git push && git push --tags
+```
+
+`uv build` writes to `dist/`. `uv publish` reads credentials from
+`~/.pypirc` (expects `[pypi]` with `username = __token__` and
+`password = pypi-...`). `uvx` users pick up the new version automatically
+on next launch.
 
 ## License
 
