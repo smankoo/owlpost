@@ -168,7 +168,9 @@ def search(
     typ, fetch_data = conn.uid(
         "fetch",
         uid_set,
-        "(BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID "
+        # UID must be explicit — Proton Bridge omits it otherwise, unlike
+        # iCloud/Gmail which echo it by default on a UID FETCH.
+        "(UID BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID "
         "IN-REPLY-TO REFERENCES)] FLAGS RFC822.SIZE)",
     )
     return _parse_fetch_envelopes(fetch_data, folder)

@@ -30,9 +30,9 @@ smtp_port = 587
 # Gmail SMTP auto-saves to "Sent Mail" — APPENDing would create duplicates.
 auto_save_sent = false
 
-# Generic example for any other IMAP/SMTP provider (Fastmail, ProtonMail
-# Bridge, your own server, etc.). Set provider = "generic" to skip
-# provider-specific behaviors.
+# Generic example for any other IMAP/SMTP provider (Fastmail, your own
+# server, etc.). Set provider = "generic" to skip provider-specific
+# behaviors.
 #
 # [accounts.work]
 # email = "you@example.com"
@@ -43,4 +43,21 @@ auto_save_sent = false
 # smtp_host = "smtp.example.com"
 # smtp_port = 587
 # smtp_security = "starttls"   # or "ssl" for port 465
+# auto_save_sent = true
+
+# Proton Mail via Proton Bridge (runs locally, exposes IMAP on 127.0.0.1).
+# Bridge uses STARTTLS with a self-signed cert, so we disable TLS verify.
+# Get the bridge password from the Bridge app (Account → Mailbox password).
+#
+# [accounts.proton]
+# email = "you@protonmail.com"
+# password = "bridge-password-xxxx"
+# provider = "generic"
+# imap_host = "127.0.0.1"
+# imap_port = 1143
+# imap_security = "starttls"
+# smtp_host = "127.0.0.1"
+# smtp_port = 1025
+# smtp_security = "starttls"
+# tls_verify = false
 # auto_save_sent = true

@@ -184,12 +184,24 @@ Once registered, you can ask Claude things like:
 - IMAP must be enabled in [Gmail settings → Forwarding and POP/IMAP](https://mail.google.com/mail/u/0/#settings/fwdandpop).
 - owlpost uses Gmail's `X-GM-THRID` extension for reliable thread detection.
 
+### Proton Mail (via Proton Bridge)
+
+Proton only exposes IMAP/SMTP through the [Proton Bridge](https://proton.me/mail/bridge)
+app, which runs on localhost with a self-signed certificate and speaks
+STARTTLS on non-standard ports. Configure with:
+
+- `provider = "generic"`
+- `imap_host = "127.0.0.1"`, `imap_port = 1143`, `imap_security = "starttls"`
+- `smtp_host = "127.0.0.1"`, `smtp_port = 1025`, `smtp_security = "starttls"`
+- `tls_verify = false` — required because Bridge's cert is self-signed
+- Use the Bridge-generated mailbox password (not your Proton account password)
+
 ### Other providers
 
-Set `provider = "generic"` and configure `imap_host`, `smtp_host`, ports, and
-`smtp_security` (`starttls` for 587 or `ssl` for 465). Folder roles will
-still be auto-detected if your provider supports SPECIAL-USE (most modern
-ones do).
+Set `provider = "generic"` and configure `imap_host`, `smtp_host`, ports,
+`imap_security` / `smtp_security` (`starttls` or `ssl`), and `tls_verify`
+(set `false` for self-signed certs). Folder roles will still be
+auto-detected if your provider supports SPECIAL-USE (most modern ones do).
 
 ## Development
 

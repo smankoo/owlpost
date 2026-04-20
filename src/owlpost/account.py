@@ -29,9 +29,25 @@ class Account:
     def name(self) -> str:
         return self.cfg.name
 
+    def _ssl_context(self) -> ssl.SSLContext:
+        ctx = ssl.create_default_context()
+        if not self.cfg.tls_verify:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
     @contextmanager
-    def imap(self) -> Iterator[imaplib.IMAP4_SSL]:
-        conn = imaplib.IMAP4_SSL(self.cfg.imap_host, self.cfg.imap_port)
+    def imap(self) -> Iterator[imaplib.IMAP4]:
+        ctx = self._ssl_context()
+        if self.cfg.imap_security == "starttls":
+            conn: imaplib.IMAP4 = imaplib.IMAP4(
+                self.cfg.imap_host, self.cfg.imap_port
+            )
+            conn.starttls(ssl_context=ctx)
+        else:
+            conn = imaplib.IMAP4_SSL(
+                self.cfg.imap_host, self.cfg.imap_port, ssl_context=ctx
+            )
         try:
             conn.login(self.cfg.email, self.cfg.password)
             yield conn
@@ -43,7 +59,7 @@ class Account:
 
     @contextmanager
     def smtp(self) -> Iterator[smtplib.SMTP]:
-        ctx = ssl.create_default_context()
+        ctx = self._ssl_context()
         if self.cfg.smtp_security == "ssl":
             conn = smtplib.SMTP_SSL(
                 self.cfg.smtp_host, self.cfg.smtp_port, context=ctx
