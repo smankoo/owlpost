@@ -18,7 +18,7 @@ from .messages import (
     set_flag,
     trash_message,
 )
-from .sending import forward_message, reply_message, send_message
+from .sending import forward_message, reply_message, save_draft, send_message
 from .threads import get_thread
 
 
@@ -203,6 +203,40 @@ def send_email(
     """
     acc = _get_account(account)
     return send_message(
+        acc,
+        to=to,
+        subject=subject,
+        body=body,
+        cc=cc,
+        bcc=bcc,
+        html=html,
+        attachments=attachments,
+        in_reply_to=in_reply_to,
+        references=references,
+    )
+
+
+@mcp.tool()
+def save_draft_email(
+    account: str,
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    html: str | None = None,
+    attachments: list[str] | None = None,
+    in_reply_to: str | None = None,
+    references: list[str] | None = None,
+) -> dict:
+    """Save an email to the account's Drafts folder without sending it.
+
+    Same parameters as send_email. Uses the account's special-use Drafts
+    folder (\\Drafts) and flags the message \\Draft. Use this when the user
+    wants to review/edit the message in their mail client before sending.
+    """
+    acc = _get_account(account)
+    return save_draft(
         acc,
         to=to,
         subject=subject,
