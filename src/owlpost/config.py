@@ -29,6 +29,10 @@ class AccountConfig:
     auto_save_sent: bool = True
     # SMTP socket type: "starttls" (587) or "ssl" (465)
     smtp_security: str = "starttls"
+    # IMAP socket type: "ssl" (993, direct TLS) or "starttls" (143/1143, upgrade)
+    imap_security: str = "ssl"
+    # Set False for local bridges with self-signed certs (e.g. Proton Bridge).
+    tls_verify: bool = True
 
     @property
     def is_gmail(self) -> bool:
@@ -69,5 +73,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
             smtp_port=int(raw.get("smtp_port", 587)),
             auto_save_sent=bool(raw.get("auto_save_sent", True)),
             smtp_security=raw.get("smtp_security", "starttls"),
+            imap_security=raw.get("imap_security", "ssl"),
+            tls_verify=bool(raw.get("tls_verify", True)),
         )
     return cfg
