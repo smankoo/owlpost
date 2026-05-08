@@ -1,6 +1,6 @@
 [project]
 name = "owlpost"
-version = "0.1.2"
+version = "0.1.3"
 description = "High-fidelity IMAP/SMTP MCP server for iCloud, Gmail, and other mail providers"
 readme = "README.md"
 license = { file = "LICENSE" }
