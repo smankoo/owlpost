@@ -382,8 +382,11 @@ def move_message(
 ) -> None:
     _select_writable(conn, folder)
     # Prefer MOVE extension when supported; fall back to COPY+DELETE
-    capabilities = conn.capabilities or ()
-    if any(b"MOVE" in c for c in capabilities):
+    capabilities = tuple(
+        c.decode() if isinstance(c, bytes) else c
+        for c in (conn.capabilities or ())
+    )
+    if "MOVE" in capabilities:
         typ, data = conn.uid("move", str(uid), quote_mailbox(dest_folder))
         if typ != "OK":
             raise RuntimeError(f"MOVE failed: {data!r}")
