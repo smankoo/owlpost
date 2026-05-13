@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+# Force-load the IDNA codec before any IMAP/socket code runs. Without this,
+# imaplib's hostname encoding fails with "unknown encoding: idna" under
+# minimal/stripped environments (frozen builds, some uvx/venv setups).
+import encodings.idna  # noqa: F401
+
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
