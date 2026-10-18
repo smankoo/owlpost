@@ -180,6 +180,10 @@ instead.
 
 ### Claude Desktop
 
+**One-click:** download `owlpost-<version>.mcpb` from the [latest release](https://github.com/smankoo/owlpost/releases/latest) and open it. Claude Desktop installs it and asks for the path to your `accounts.toml`.
+
+**Manual:**
+
 Edit `claude_desktop_config.json` (macOS:
 `~/Library/Application Support/Claude/claude_desktop_config.json`,
 Windows: `%APPDATA%\Claude\claude_desktop_config.json`):

@@ -1,0 +1,125 @@
+{
+  "manifest_version": "0.4",
+  "name": "owlpost",
+  "display_name": "owlpost",
+  "version": "0.2.0",
+  "description": "IMAP/SMTP email for iCloud, Gmail, Proton Bridge and any provider: search, read, follow threads, send.",
+  "long_description": "owlpost is an MCP server for real-world IMAP/SMTP mail. It handles provider quirks (iCloud BODY.PEEK fetches and CRLF APPEND, Gmail X-GM-THRID threads and auto-saved Sent, Proton Bridge STARTTLS with self-signed certs) and auto-discovers folders via SPECIAL-USE. Configure one or more accounts in an accounts.toml file (app passwords, environment variables or a password command).",
+  "author": {
+    "name": "Sumeet Singh Mankoo",
+    "url": "https://github.com/smankoo"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/smankoo/owlpost"
+  },
+  "homepage": "https://github.com/smankoo/owlpost",
+  "documentation": "https://github.com/smankoo/owlpost#readme",
+  "support": "https://github.com/smankoo/owlpost/issues",
+  "server": {
+    "type": "uv",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "server/main.py"
+      ],
+      "env": {
+        "OWLPOST_CONFIG": "${user_config.config_file}"
+      }
+    }
+  },
+  "user_config": {
+    "config_file": {
+      "type": "file",
+      "title": "accounts.toml",
+      "description": "Path to your owlpost accounts.toml (see accounts.example.toml in the repository).",
+      "required": true,
+      "default": "${HOME}/.config/owlpost/accounts.toml"
+    }
+  },
+  "tools": [
+    {
+      "name": "list_accounts",
+      "description": "List the mail accounts configured in owlpost's accounts.toml."
+    },
+    {
+      "name": "list_folders",
+      "description": "List every IMAP folder (mailbox) in an account."
+    },
+    {
+      "name": "resolve_folder",
+      "description": "Resolve a special-use role to the provider-specific folder name."
+    },
+    {
+      "name": "search_messages",
+      "description": "Search one folder with structured filters and return message envelopes, newest first."
+    },
+    {
+      "name": "read_email",
+      "description": "Read one message: decoded headers, body and attachment list, without marking it read."
+    },
+    {
+      "name": "save_attachment",
+      "description": "Download one attachment from a message and write it to the local filesystem."
+    },
+    {
+      "name": "get_conversation",
+      "description": "Return every message in the same conversation as a given message, oldest first."
+    },
+    {
+      "name": "send_email",
+      "description": "Send a new email over SMTP immediately; this cannot be undone, so confirm with the user first."
+    },
+    {
+      "name": "save_draft_email",
+      "description": "Compose an email and save it to the account's Drafts folder without sending it."
+    },
+    {
+      "name": "reply_email",
+      "description": "Reply to a message and send the reply immediately; confirm with the user first."
+    },
+    {
+      "name": "forward_email",
+      "description": "Forward a message to new recipients and send it immediately; confirm with the user first."
+    },
+    {
+      "name": "mark_read",
+      "description": "Mark a message as read or unread by setting or clearing its \\Seen flag."
+    },
+    {
+      "name": "flag_message",
+      "description": "Flag (star) or unflag a message by setting or clearing its \\Flagged flag."
+    },
+    {
+      "name": "move_email",
+      "description": "Move a message from one folder to another."
+    },
+    {
+      "name": "delete_email",
+      "description": "Delete a message by moving it to the account's Trash folder."
+    }
+  ],
+  "keywords": [
+    "email",
+    "imap",
+    "smtp",
+    "icloud",
+    "gmail",
+    "proton"
+  ],
+  "license": "MIT",
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  }
+}

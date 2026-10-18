@@ -193,3 +193,39 @@ jobs:
 
       - name: Publish to the MCP Registry
         run: ./mcp-publisher publish
+
+  mcpb:
+    # One-click bundle for Claude Desktop and Smithery, attached to the GitHub release.
+    needs: [check-version, pypi]
+    if: ${{ !inputs.skip_pypi }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Stamp the bundle with the release version
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          jq --arg v "$VERSION" '.version = $v' mcpb/manifest.json > mcpb/manifest.tmp && mv mcpb/manifest.tmp mcpb/manifest.json
+          sed -i -E "s/^version = \".*\"/version = \"$VERSION\"/; s/owlpost==[0-9.]+/owlpost==$VERSION/" mcpb/pyproject.toml
+
+      - name: Validate and pack
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          npx -y @anthropic-ai/mcpb validate mcpb/manifest.json
+          npx -y @anthropic-ai/mcpb pack mcpb "owlpost-$VERSION.mcpb"
+
+      - name: Attach to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          gh release view "v$VERSION" >/dev/null 2>&1 || gh release create "v$VERSION" --title "owlpost $VERSION" --notes "See CHANGELOG.md."
+          gh release upload "v$VERSION" "owlpost-$VERSION.mcpb" --clobber
