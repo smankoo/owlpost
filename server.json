@@ -1,0 +1,68 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.smankoo/owlpost",
+  "title": "owlpost",
+  "description": "IMAP/SMTP email for iCloud, Gmail, Proton Bridge and more: search, read, follow threads, send.",
+  "repository": {
+    "url": "https://github.com/smankoo/owlpost",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/smankoo/owlpost",
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "owlpost",
+      "version": "0.2.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "OWLPOST_CONFIG",
+          "description": "Path to accounts.toml. Defaults to ~/.config/owlpost/accounts.toml.",
+          "format": "filepath",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    },
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/smankoo/owlpost:0.2.0",
+      "runtimeHint": "docker",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--mount",
+          "description": "Mount the directory containing accounts.toml read-only at /config.",
+          "value": "type=bind,src={config_dir},dst=/config,readonly",
+          "isRequired": true,
+          "variables": {
+            "config_dir": {
+              "description": "Host directory that contains your owlpost accounts.toml.",
+              "format": "filepath",
+              "isRequired": true,
+              "placeholder": "/home/you/.config/owlpost"
+            }
+          }
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "OWLPOST_CONFIG",
+          "description": "Path to the config file inside the container.",
+          "default": "/config/accounts.toml",
+          "format": "filepath",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

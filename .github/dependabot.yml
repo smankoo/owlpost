@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+    ignore:
+      # owlpost is built on FastMCP from mcp 1.x; mcp 2.x is a breaking rewrite.
+      - dependency-name: mcp
+        update-types: ["version-update:semver-major"]

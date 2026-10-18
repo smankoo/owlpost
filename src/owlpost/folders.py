@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import imaplib
 import re
-from functools import lru_cache
 
 # Map our friendly role names to IMAP SPECIAL-USE flags.
 SPECIAL_USE_FLAGS = {
@@ -62,9 +61,7 @@ def list_folders(conn: imaplib.IMAP4_SSL) -> list[dict]:
         # Inbox is special-cased — never tagged with SPECIAL-USE
         if role is None and name.upper() == "INBOX":
             role = "inbox"
-        out.append(
-            {"name": name, "flags": flags, "delimiter": delim, "role": role}
-        )
+        out.append({"name": name, "flags": flags, "delimiter": delim, "role": role})
     return out
 
 
