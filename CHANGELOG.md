@@ -12,6 +12,7 @@ Tool names, argument names and defaults are unchanged; existing configs keep
 working as-is.
 
 ### Added
+- MCPB bundle (`owlpost-<version>.mcpb`) attached to each GitHub release, for one-click install in Claude Desktop and Smithery.
 - `password_env` and `password_command` account keys as alternatives to an
   inline `password` (exactly one of the three must be set).
   `password_command` runs without a shell, with a 10 second timeout, and its
