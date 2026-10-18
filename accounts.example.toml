@@ -4,9 +4,20 @@
 # credentials. Each [accounts.<name>] block defines one mailbox. The <name>
 # is what you'll pass to MCP tools as the `account` argument.
 #
+# owlpost looks for the config at, in order: the --config flag, the
+# OWLPOST_CONFIG environment variable, then ~/.config/owlpost/accounts.toml.
+#
 # IMPORTANT: use app-specific passwords, not your real password.
 #   - iCloud: https://account.apple.com → Sign-In and Security → App-Specific Passwords
 #   - Gmail:  https://myaccount.google.com/apppasswords (requires 2FA enabled)
+#
+# Each account needs exactly ONE of:
+#   password         = "..."              the password itself
+#   password_env     = "VAR_NAME"         read from an environment variable
+#   password_command = "op read op://..." run a command (no shell, 10s timeout)
+#                                         and use its output, minus the
+#                                         trailing newline
+# If you keep a password in this file, chmod 600 it.
 
 [accounts.icloud]
 email = "you@icloud.com"           # or your @me.com / custom domain alias
@@ -21,7 +32,9 @@ auto_save_sent = true
 
 [accounts.gmail]
 email = "you@gmail.com"
-password = "xxxx xxxx xxxx xxxx"   # Gmail app password (16 chars, spaces ok)
+# Read the Gmail app password (16 chars, spaces ok) from the environment.
+# Set it in your MCP client's "env" block.
+password_env = "OWLPOST_GMAIL_PASSWORD"
 provider = "gmail"
 imap_host = "imap.gmail.com"
 imap_port = 993
@@ -32,14 +45,17 @@ auto_save_sent = false
 
 # Generic example for any other IMAP/SMTP provider (Fastmail, your own
 # server, etc.). Set provider = "generic" to skip provider-specific
-# behaviors.
+# behaviors. Here the password comes from a password manager.
 #
 # [accounts.work]
 # email = "you@example.com"
-# password = "..."
+# password_command = "op read op://Private/Work Mail/app-password"
+# # or: password_command = "pass show mail/work"
+# # or: password_command = "security find-generic-password -s owlpost-work -w"
 # provider = "generic"
 # imap_host = "imap.example.com"
 # imap_port = 993
+# imap_security = "ssl"        # or "starttls" for port 143
 # smtp_host = "smtp.example.com"
 # smtp_port = 587
 # smtp_security = "starttls"   # or "ssl" for port 465

@@ -17,21 +17,17 @@ import email
 import imaplib
 import re
 from email import policy
-from typing import Iterable
 
 from .account import Account
-from .folders import list_folders, quote_mailbox, resolve_role
+from .folders import quote_mailbox, resolve_role
 from .messages import _envelope_from_msg
 
 
-def _fetch_envelope(
-    conn: imaplib.IMAP4_SSL, folder: str, uid: bytes | str
-) -> dict | None:
+def _fetch_envelope(conn: imaplib.IMAP4_SSL, folder: str, uid: bytes | str) -> dict | None:
     typ, data = conn.uid(
         "fetch",
         uid if isinstance(uid, str) else uid.decode(),
-        "(BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID "
-        "IN-REPLY-TO REFERENCES)] FLAGS)",
+        "(BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES)] FLAGS)",
     )
     if typ != "OK" or not data:
         return None
@@ -40,9 +36,7 @@ def _fetch_envelope(
             meta, header_bytes = item
             msg = email.message_from_bytes(header_bytes, policy=policy.default)
             uid_m = re.search(rb"UID (\d+)", meta)
-            env = _envelope_from_msg(
-                msg, uid=uid_m.group(1).decode() if uid_m else None
-            )
+            env = _envelope_from_msg(msg, uid=uid_m.group(1).decode() if uid_m else None)
             env["folder"] = folder
             return env
     return None
@@ -58,9 +52,7 @@ def get_thread_gmail(
         # Locate the seed UID in [Gmail]/All Mail
         seed_uid = None
         if message_id:
-            typ, data = c.uid(
-                "search", None, "HEADER", "Message-ID", message_id
-            )
+            typ, data = c.uid("search", None, "HEADER", "Message-ID", message_id)
             if typ == "OK" and data and data[0]:
                 seed_uid = data[0].split()[0].decode()
         elif uid and folder:
@@ -73,15 +65,11 @@ def get_thread_gmail(
             )
             for item in data or []:
                 if isinstance(item, tuple):
-                    msg = email.message_from_bytes(
-                        item[1], policy=policy.default
-                    )
+                    msg = email.message_from_bytes(item[1], policy=policy.default)
                     mid = (msg.get("Message-ID") or "").strip()
                     if mid:
                         c.select(quote_mailbox(all_mail), readonly=True)
-                        typ, data = c.uid(
-                            "search", None, "HEADER", "Message-ID", mid
-                        )
+                        typ, data = c.uid("search", None, "HEADER", "Message-ID", mid)
                         if typ == "OK" and data and data[0]:
                             seed_uid = data[0].split()[0].decode()
         if not seed_uid:
@@ -141,9 +129,7 @@ def get_thread_generic(
             )
             for item in data or []:
                 if isinstance(item, tuple):
-                    msg = email.message_from_bytes(
-                        item[1], policy=policy.default
-                    )
+                    msg = email.message_from_bytes(item[1], policy=policy.default)
                     seed = (msg.get("Message-ID") or "").strip() or None
                     break
         if not seed:
@@ -201,9 +187,5 @@ def get_thread(
     folder: str | None = None,
 ) -> list[dict]:
     if account.cfg.is_gmail:
-        return get_thread_gmail(
-            account, message_id=message_id, uid=uid, folder=folder
-        )
-    return get_thread_generic(
-        account, message_id=message_id, uid=uid, folder=folder
-    )
+        return get_thread_gmail(account, message_id=message_id, uid=uid, folder=folder)
+    return get_thread_generic(account, message_id=message_id, uid=uid, folder=folder)

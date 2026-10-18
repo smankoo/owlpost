@@ -1,0 +1,9 @@
+# Keep the build context to what the image needs, and never ship secrets.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!accounts.example.toml
+!src/
+src/**/__pycache__
+src/**/*.py[cod]

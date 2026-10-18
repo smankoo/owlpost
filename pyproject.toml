@@ -1,6 +1,6 @@
 [project]
 name = "owlpost"
-version = "0.1.4"
+version = "0.2.0"
 description = "High-fidelity IMAP/SMTP MCP server for iCloud, Gmail, and other mail providers"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -29,21 +29,30 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
     "Topic :: Communications :: Email",
     "Topic :: Communications :: Email :: Post-Office :: IMAP",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=1.10,<2",
 ]
 
 [project.urls]
 Homepage = "https://github.com/smankoo/owlpost"
 Repository = "https://github.com/smankoo/owlpost"
 Issues = "https://github.com/smankoo/owlpost/issues"
+Changelog = "https://github.com/smankoo/owlpost/blob/main/CHANGELOG.md"
 
 [project.scripts]
 owlpost = "owlpost.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "jsonschema>=4",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -58,4 +67,22 @@ include = [
     "README.md",
     "LICENSE",
     "accounts.example.toml",
+    "CHANGELOG.md",
+    "server.json",
+    "tests",
+    "scripts",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["owlpost"]

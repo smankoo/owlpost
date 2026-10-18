@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import imaplib
 import mimetypes
-import os
 import time
 from email import policy
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from pathlib import Path
-from typing import Iterable
 
 from .account import Account
 from .folders import quote_mailbox, resolve_role
-from .messages import _decode_header, read_message
+from .messages import read_message
 
 
 def _build_message(
@@ -60,9 +58,7 @@ def _build_message(
         data = p.read_bytes()
         ctype, _ = mimetypes.guess_type(str(p))
         maintype, subtype = (ctype or "application/octet-stream").split("/", 1)
-        msg.add_attachment(
-            data, maintype=maintype, subtype=subtype, filename=p.name
-        )
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=p.name)
     return msg
 
 
@@ -166,9 +162,7 @@ def send_message(
     )
     recipients = list(to) + list(cc or []) + list(bcc or [])
     with account.smtp() as s:
-        s.send_message(
-            msg, from_addr=account.cfg.email, to_addrs=recipients
-        )
+        s.send_message(msg, from_addr=account.cfg.email, to_addrs=recipients)
     saved_to = _append_to_sent(account, msg)
     return {
         "message_id": msg["Message-ID"],
@@ -263,6 +257,7 @@ def forward_message(
 ) -> dict:
     """Forward a message. Original attachments are re-attached by default."""
     import tempfile
+
     from .messages import download_attachment
 
     with account.imap() as c:
@@ -272,10 +267,10 @@ def forward_message(
     sender = (original.get("from") or [{}])[0]
     intro = (
         f"\n\n---------- Forwarded message ----------\n"
-        f"From: {sender.get('name','')} <{sender.get('email','')}>\n"
-        f"Date: {original.get('date','')}\n"
-        f"Subject: {original.get('subject','')}\n"
-        f"To: {', '.join(a.get('email','') for a in original.get('to') or [])}\n\n"
+        f"From: {sender.get('name', '')} <{sender.get('email', '')}>\n"
+        f"Date: {original.get('date', '')}\n"
+        f"Subject: {original.get('subject', '')}\n"
+        f"To: {', '.join(a.get('email', '') for a in original.get('to') or [])}\n\n"
     )
     full_body = body + intro + (original.get("text") or "")
 
@@ -284,9 +279,7 @@ def forward_message(
         tmpdir = Path(tempfile.mkdtemp(prefix="owlpost-fwd-"))
         with account.imap() as c:
             for att in original["attachments"]:
-                info = download_attachment(
-                    c, folder, uid, att["part"], str(tmpdir)
-                )
+                info = download_attachment(c, folder, uid, att["part"], str(tmpdir))
                 fwd_attachments.append(info["path"])
 
     return send_message(

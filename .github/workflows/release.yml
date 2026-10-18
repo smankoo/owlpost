@@ -1,0 +1,195 @@
+name: Release
+
+# Push a tag like v0.2.0 to release. The tag, pyproject.toml and server.json
+# must all agree on the version.
+#
+# workflow_dispatch (run it on a tag ref) exists for re-running a release, and
+# for publishing before PyPI trusted publishing is configured: with
+# skip_pypi=true the PyPI upload is skipped and the MCP Registry entry is
+# published with only the OCI (ghcr.io) package.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      skip_pypi:
+        description: "Skip PyPI and publish the registry entry with only the OCI package"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/smankoo/owlpost
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tag, pyproject.toml and server.json must match
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::Run this workflow on a tag (v*), not on '$GITHUB_REF_NAME'"
+            exit 1
+          fi
+          tag="${GITHUB_REF_NAME#v}"
+          pyproject=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          module=$(python3 -c 'import re; print(re.search(r"__version__ = \"(.+?)\"", open("src/owlpost/__init__.py").read())[1])')
+          server=$(jq -r .version server.json)
+          pypi_pkg=$(jq -r '.packages[] | select(.registryType == "pypi") | .version' server.json)
+          oci_pkg=$(jq -r '.packages[] | select(.registryType == "oci") | .identifier' server.json)
+          echo "tag=$tag pyproject=$pyproject __version__=$module server.json=$server pypi=$pypi_pkg oci=$oci_pkg"
+          for v in "$pyproject" "$module" "$server" "$pypi_pkg"; do
+            if [ "$v" != "$tag" ]; then
+              echo "::error::Version mismatch: tag is $tag but found $v"
+              exit 1
+            fi
+          done
+          if [ "$oci_pkg" != "$IMAGE:$tag" ]; then
+            echo "::error::server.json OCI identifier is $oci_pkg, expected $IMAGE:$tag"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  test-build:
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+      - run: uv run python scripts/validate_server_json.py server.json
+
+      - name: Build
+        run: uv build
+
+      - name: Check the registry marker survives packaging
+        run: |
+          unzip -p dist/*.whl '*.dist-info/METADATA' | grep -F "mcp-name: $(jq -r .name server.json)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  pypi:
+    needs: [check-version, test-build]
+    if: ${{ !inputs.skip_pypi }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/owlpost/${{ needs.check-version.outputs.version }}/
+    permissions:
+      id-token: write # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  docker:
+    needs: [check-version, test-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.check-version.outputs.version }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.version=${{ needs.check-version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          annotations: |
+            index:io.modelcontextprotocol.server.name=io.github.smankoo/owlpost
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  mcp-registry:
+    needs: [check-version, pypi, docker]
+    # Run when PyPI succeeded, or was deliberately skipped via skip_pypi.
+    if: >-
+      ${{ always()
+          && needs.check-version.result == 'success'
+          && needs.docker.result == 'success'
+          && (needs.pypi.result == 'success' || (needs.pypi.result == 'skipped' && inputs.skip_pypi)) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # mcp-publisher login github-oidc
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: OCI-only server.json (skip_pypi)
+        if: ${{ inputs.skip_pypi }}
+        run: |
+          jq '.packages |= map(select(.registryType == "oci"))' server.json > server.oci.json
+          mv server.oci.json server.json
+          cat server.json
+
+      - name: Wait for PyPI to serve the new version
+        if: ${{ !inputs.skip_pypi }}
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null "https://pypi.org/pypi/owlpost/$VERSION/json"; then exit 0; fi
+            echo "waiting for owlpost $VERSION on PyPI ($i/30)"; sleep 10
+          done
+          echo "::error::owlpost $VERSION never appeared on PyPI"; exit 1
+
+      - name: Install mcp-publisher
+        run: |
+          os=$(uname -s | tr '[:upper:]' '[:lower:]')
+          arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_${os}_${arch}.tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --version || true
+
+      - name: Log in to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to the MCP Registry
+        run: ./mcp-publisher publish

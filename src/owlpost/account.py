@@ -5,8 +5,8 @@ from __future__ import annotations
 import imaplib
 import smtplib
 import ssl
-from contextlib import contextmanager
-from typing import Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 
 from .config import AccountConfig
 
@@ -40,40 +40,30 @@ class Account:
     def imap(self) -> Iterator[imaplib.IMAP4]:
         ctx = self._ssl_context()
         if self.cfg.imap_security == "starttls":
-            conn: imaplib.IMAP4 = imaplib.IMAP4(
-                self.cfg.imap_host, self.cfg.imap_port
-            )
+            conn: imaplib.IMAP4 = imaplib.IMAP4(self.cfg.imap_host, self.cfg.imap_port)
             conn.starttls(ssl_context=ctx)
         else:
-            conn = imaplib.IMAP4_SSL(
-                self.cfg.imap_host, self.cfg.imap_port, ssl_context=ctx
-            )
+            conn = imaplib.IMAP4_SSL(self.cfg.imap_host, self.cfg.imap_port, ssl_context=ctx)
         try:
-            conn.login(self.cfg.email, self.cfg.password)
+            conn.login(self.cfg.email, self.cfg.resolve_password())
             yield conn
         finally:
-            try:
+            with suppress(Exception):
                 conn.logout()
-            except Exception:
-                pass
 
     @contextmanager
     def smtp(self) -> Iterator[smtplib.SMTP]:
         ctx = self._ssl_context()
         if self.cfg.smtp_security == "ssl":
-            conn = smtplib.SMTP_SSL(
-                self.cfg.smtp_host, self.cfg.smtp_port, context=ctx
-            )
+            conn = smtplib.SMTP_SSL(self.cfg.smtp_host, self.cfg.smtp_port, context=ctx)
         else:
             conn = smtplib.SMTP(self.cfg.smtp_host, self.cfg.smtp_port)
             conn.ehlo()
             conn.starttls(context=ctx)
             conn.ehlo()
         try:
-            conn.login(self.cfg.email, self.cfg.password)
+            conn.login(self.cfg.email, self.cfg.resolve_password())
             yield conn
         finally:
-            try:
+            with suppress(Exception):
                 conn.quit()
-            except Exception:
-                pass
