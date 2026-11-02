@@ -43,7 +43,8 @@ uvx owlpost
   - Servers without the `MOVE` extension get COPY + `\Deleted` + EXPUNGE instead
   - Proton Bridge omits `UID` from FETCH responses unless asked → owlpost always asks
 - **Conversation following** — Gmail's `X-GM-THRID` extension where available, otherwise a generic Message-ID/References BFS across folders
-- **Reliable connections** — short-lived per-operation IMAP sessions instead of long-lived ones that drop randomly
+- **Fast, reliable connections** — logged-in IMAP sessions are reused for up to a minute (health-checked with NOOP, discarded after any error), every socket has a timeout, and read-only tools retry once if the server drops the connection
+- **Typed results** — every tool publishes an MCP output schema and returns structured content
 - **MIME-aware** — parses multipart messages, decodes headers, lists attachments, downloads them to disk
 - **Threaded reply/forward** — preserves `In-Reply-To`/`References`, quotes the original
 - **Drafts** — compose into the Drafts folder so you can review and send from your own mail client
@@ -299,7 +300,7 @@ Once registered, you can ask things like:
 ### iCloud
 
 - Use an [app-specific password](https://account.apple.com), not your Apple ID password.
-- iCloud throttles aggressive reconnection. owlpost uses short-lived per-op sessions but doesn't pool — if you get `SSLEOFError: EOF`, back off for ~30 seconds.
+- iCloud throttles aggressive reconnection. owlpost reuses its IMAP session between calls to avoid this, but if you still see `SSLEOFError: EOF`, back off for ~30 seconds.
 - Sent folder is `Sent Messages`, Trash is `Deleted Messages`. Both are auto-detected.
 - Keep `auto_save_sent = true`: iCloud's SMTP doesn't keep a copy of what you send.
 

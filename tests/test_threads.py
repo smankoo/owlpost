@@ -98,3 +98,17 @@ def test_gmail_thread_by_folder_uid_translates_to_all_mail(imap_server):
 def test_gmail_unknown_seed(imap_server):
     _seed_gmail_thread(imap_server)
     assert get_thread(make_account(provider="gmail"), message_id="<nope@example.com>") == []
+
+
+def test_generic_walk_batches_imap_round_trips(imap_server):
+    _seed_generic_thread(imap_server)
+    thread = get_thread(make_account(), message_id="<c@example.com>")
+    assert len(thread) == 3
+    searches = [e for e in imap_server.log if e[:2] == ("UID", "search")]
+    fetches = [e for e in imap_server.log if e[:2] == ("UID", "fetch")]
+    folders = 4  # INBOX, Sent Messages, Archive, Drafts
+    # One SEARCH per folder per round (seed, then its references, then a final
+    # round that finds nothing new), and at most one FETCH per folder per round.
+    assert len(searches) <= 3 * folders
+    assert len(fetches) <= 3 * folders
+    assert all(len(e[3:]) > 3 for e in searches), "each search ORs the whole frontier together"

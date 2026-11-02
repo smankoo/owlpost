@@ -6,10 +6,13 @@ import email
 import email.header
 import email.utils
 import imaplib
+import os
 import re
+from collections.abc import Iterator
 from datetime import date, datetime
 from email import policy
 from email.message import EmailMessage
+from pathlib import Path
 from typing import Any
 
 from .folders import quote_mailbox, resolve_role
@@ -78,6 +81,15 @@ def _imap_date(d: str | date) -> str:
 
 # ----- search ----------------------------------------------------------------
 
+_RAW_TOKEN_RE = re.compile(r'"(?:\\.|[^"\\])*"|\S+')
+
+# Header fields fetched for envelopes. UID must be explicit: Proton Bridge
+# omits it otherwise, unlike iCloud/Gmail which echo it on a UID FETCH.
+_ENVELOPE_FETCH = (
+    "(UID BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID "
+    "IN-REPLY-TO REFERENCES)] FLAGS RFC822.SIZE)"
+)
+
 
 def build_search_criteria(
     *,
@@ -101,8 +113,9 @@ def build_search_criteria(
     are properly quoted by imaplib.
     """
     if raw:
-        # caller knows what they're doing
-        return raw.split()
+        # Caller knows what they're doing; split on whitespace but keep
+        # quoted strings such as FROM "Jane Doe" in one token.
+        return _RAW_TOKEN_RE.findall(raw)
 
     def q(v: str) -> str:
         # imaplib only auto-quotes when it sees specials; strings with spaces
@@ -151,34 +164,42 @@ def build_search_criteria(
     return parts
 
 
+def select_folder(conn: imaplib.IMAP4, folder: str, *, readonly: bool = True) -> None:
+    typ, _ = conn.select(quote_mailbox(folder), readonly=readonly)
+    if typ != "OK":
+        raise RuntimeError(f"SELECT {folder} failed (does the folder exist? see list_folders)")
+
+
 def search(
-    conn: imaplib.IMAP4_SSL,
+    conn: imaplib.IMAP4,
     folder: str,
     criteria: list[str],
     limit: int = 50,
 ) -> list[dict]:
-    typ, _ = conn.select(quote_mailbox(folder), readonly=True)
-    if typ != "OK":
-        raise RuntimeError(f"SELECT {folder} failed")
+    select_folder(conn, folder)
     typ, data = conn.uid("search", None, *criteria)
     if typ != "OK":
         raise RuntimeError(f"SEARCH failed: {data!r}")
     uids = data[0].split() if data and data[0] else []
-    # Most recent last → reverse so we return newest first
-    uids = list(reversed(uids))[:limit]
-    if not uids:
+    # UIDs ascend with arrival, so the last ones are the newest.
+    newest = list(reversed(uids))[: max(limit, 0)]
+    return fetch_envelopes(conn, folder, newest)
+
+
+def fetch_envelopes(conn: imaplib.IMAP4, folder: str, uids: list[bytes] | list[str]) -> list[dict]:
+    """Fetch envelopes for UIDs in the selected folder with one UID FETCH.
+
+    Results come back in the order of `uids`: servers answer a FETCH in
+    their own (usually ascending) order regardless of how the set is written.
+    """
+    wanted = [u.decode() if isinstance(u, bytes) else str(u) for u in uids]
+    if not wanted:
         return []
-    # Fetch envelopes in one shot
-    uid_set = b",".join(uids).decode()
-    typ, fetch_data = conn.uid(
-        "fetch",
-        uid_set,
-        # UID must be explicit — Proton Bridge omits it otherwise, unlike
-        # iCloud/Gmail which echo it by default on a UID FETCH.
-        "(UID BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID "
-        "IN-REPLY-TO REFERENCES)] FLAGS RFC822.SIZE)",
-    )
-    return _parse_fetch_envelopes(fetch_data, folder)
+    typ, fetch_data = conn.uid("fetch", ",".join(wanted), _ENVELOPE_FETCH)
+    if typ != "OK":
+        raise RuntimeError(f"FETCH failed: {fetch_data!r}")
+    by_uid = {env["uid"]: env for env in _parse_fetch_envelopes(fetch_data, folder)}
+    return [by_uid[u] for u in wanted if u in by_uid]
 
 
 def _parse_fetch_envelopes(fetch_data, folder: str) -> list[dict]:
@@ -186,7 +207,7 @@ def _parse_fetch_envelopes(fetch_data, folder: str) -> list[dict]:
     line (with UID and FLAGS) with the literal header block that follows it.
     """
     out: list[dict] = []
-    for item in fetch_data:
+    for item in fetch_data or []:
         if isinstance(item, tuple):
             meta, header_bytes = item
             uid_m = re.search(rb"UID (\d+)", meta)
@@ -210,32 +231,30 @@ def _parse_fetch_envelopes(fetch_data, folder: str) -> list[dict]:
 # ----- read full message -----------------------------------------------------
 
 
-def read_message(
-    conn: imaplib.IMAP4_SSL,
+def fetch_raw(conn: imaplib.IMAP4, folder: str, uid: str) -> tuple[bytes, list[str]]:
+    """Return (RFC 822 bytes, flags) for one message, without marking it read."""
+    select_folder(conn, folder)
+    typ, data = conn.uid("fetch", str(uid), "(UID BODY.PEEK[] FLAGS)")
+    if typ != "OK":
+        raise RuntimeError(f"FETCH uid={uid} failed: {data!r}")
+    for item in data or []:
+        if isinstance(item, tuple):
+            meta, body = item
+            flags_m = re.search(rb"FLAGS \(([^)]*)\)", meta)
+            return body, flags_m.group(1).decode().split() if flags_m else []
+    raise RuntimeError(f"No message with uid={uid} in {folder}; it may have been moved or deleted")
+
+
+def parse_message(
+    raw: bytes,
+    *,
     folder: str,
     uid: str,
-    *,
+    flags: list[str],
     include_html: bool = False,
     include_text: bool = True,
     body_max_chars: int = 50_000,
 ) -> dict[str, Any]:
-    typ, _ = conn.select(quote_mailbox(folder), readonly=True)
-    if typ != "OK":
-        raise RuntimeError(f"SELECT {folder} failed")
-    typ, data = conn.uid("fetch", str(uid), "(BODY.PEEK[] FLAGS)")
-    if typ != "OK" or not data or data[0] is None:
-        raise RuntimeError(f"FETCH uid={uid} failed")
-    raw = None
-    flags: list[str] = []
-    for item in data:
-        if isinstance(item, tuple):
-            meta, body = item
-            raw = body
-            flags_m = re.search(rb"FLAGS \(([^)]*)\)", meta)
-            if flags_m:
-                flags = flags_m.group(1).decode().split()
-    if raw is None:
-        raise RuntimeError(f"No body returned for uid={uid}")
     msg = email.message_from_bytes(raw, policy=policy.default)
     text_body, html_body, attachments = _walk_body(msg)
     text_full_len = len(text_body) if text_body else 0
@@ -248,115 +267,142 @@ def read_message(
             return s
         return s[:body_max_chars] + f"\n\n[... truncated, {len(s) - body_max_chars} more chars ...]"
 
-    text_body = None if not include_text else _truncate(text_body)
-    html_body = None if not include_html else _truncate(html_body)
-
     env = _envelope_from_msg(msg, uid=str(uid))
     env["folder"] = folder
+    env["flags"] = flags
+    env["seen"] = "\\Seen" in flags
+    env["flagged"] = "\\Flagged" in flags
+    env["text"] = _truncate(text_body) if include_text else None
+    env["html"] = _truncate(html_body) if include_html else None
     env["text_full_length"] = text_full_len
     env["html_full_length"] = html_full_len
-    env["flags"] = flags
-    env["text"] = text_body
-    env["html"] = html_body
     env["attachments"] = attachments
     return env
+
+
+def read_message(
+    conn: imaplib.IMAP4,
+    folder: str,
+    uid: str,
+    *,
+    include_html: bool = False,
+    include_text: bool = True,
+    body_max_chars: int = 50_000,
+) -> dict[str, Any]:
+    raw, flags = fetch_raw(conn, folder, uid)
+    return parse_message(
+        raw,
+        folder=folder,
+        uid=str(uid),
+        flags=flags,
+        include_html=include_html,
+        include_text=include_text,
+        body_max_chars=body_max_chars,
+    )
+
+
+def leaf_parts(msg: EmailMessage) -> Iterator[tuple[int, EmailMessage]]:
+    """Yield (1-based index, part) for every non-multipart part.
+
+    This numbering is the `part` index read_email reports and
+    save_attachment accepts, so every caller must walk the same way.
+    """
+    index = 0
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        index += 1
+        yield index, part
+
+
+def is_attachment(part: EmailMessage) -> bool:
+    return part.get_content_disposition() == "attachment" or bool(part.get_filename())
 
 
 def _walk_body(msg: EmailMessage):
     text_body = None
     html_body = None
     attachments = []
-    part_index = 0
-    for part in msg.walk():
-        if part.is_multipart():
-            continue
-        part_index += 1
+    for index, part in leaf_parts(msg):
         ctype = part.get_content_type()
-        disp = part.get_content_disposition() or ""
-        filename = part.get_filename()
-        if disp == "attachment" or filename:
+        if is_attachment(part):
             payload = part.get_payload(decode=True) or b""
             attachments.append(
                 {
-                    "part": part_index,
-                    "filename": _decode_header(filename) or f"part-{part_index}",
+                    "part": index,
+                    "filename": _decode_header(part.get_filename()) or f"part-{index}",
                     "mime": ctype,
                     "size": len(payload),
                     "content_id": (part.get("Content-ID") or "").strip("<>") or None,
                 }
             )
         elif ctype == "text/plain" and text_body is None:
-            try:
-                text_body = part.get_content()
-            except Exception:
-                text_body = (part.get_payload(decode=True) or b"").decode("utf-8", "replace")
+            text_body = _part_text(part)
         elif ctype == "text/html" and html_body is None:
-            try:
-                html_body = part.get_content()
-            except Exception:
-                html_body = (part.get_payload(decode=True) or b"").decode("utf-8", "replace")
+            html_body = _part_text(part)
     return text_body, html_body, attachments
 
 
+def _part_text(part: EmailMessage) -> str:
+    try:
+        return part.get_content()
+    except Exception:
+        # Unknown or lying charset: decode what we can rather than fail the read.
+        return (part.get_payload(decode=True) or b"").decode("utf-8", "replace")
+
+
+def safe_filename(name: str | None, fallback: str) -> str:
+    """Reduce an attacker-controlled attachment filename to a bare file name.
+
+    Strips directory components (both separators) so that a name like
+    "../../.zshrc" cannot write outside the chosen directory.
+    """
+    base = (name or "").replace("\\", "/").rsplit("/", 1)[-1].strip().replace("\x00", "")
+    if base in ("", ".", ".."):
+        return fallback
+    return base
+
+
 def download_attachment(
-    conn: imaplib.IMAP4_SSL,
+    conn: imaplib.IMAP4,
     folder: str,
     uid: str,
     part_index: int,
     save_to: str,
 ) -> dict:
-    typ, _ = conn.select(quote_mailbox(folder), readonly=True)
-    if typ != "OK":
-        raise RuntimeError(f"SELECT {folder} failed")
-    typ, data = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
-    raw = None
-    for item in data:
-        if isinstance(item, tuple):
-            raw = item[1]
-            break
-    if raw is None:
-        raise RuntimeError("attachment fetch failed")
+    raw, _ = fetch_raw(conn, folder, uid)
     msg = email.message_from_bytes(raw, policy=policy.default)
-    counter = 0
-    for part in msg.walk():
-        if part.is_multipart():
+    for index, part in leaf_parts(msg):
+        if index != part_index:
             continue
-        counter += 1
-        if counter == part_index:
-            payload = part.get_payload(decode=True) or b""
-            from pathlib import Path
-
-            raw_save = save_to
-            p = Path(save_to).expanduser()
-            # Treat as directory if: explicit trailing slash, existing dir,
-            # or no file extension. Otherwise treat as full file path.
-            looks_like_dir = raw_save.endswith("/") or p.is_dir() or p.suffix == ""
-            if looks_like_dir:
-                p.mkdir(parents=True, exist_ok=True)
-                fname = part.get_filename() or f"attachment-{counter}.bin"
-                p = p / fname
-            else:
-                p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(payload)
-            return {
-                "path": str(p),
-                "size": len(payload),
-                "mime": part.get_content_type(),
-                "filename": part.get_filename(),
-            }
-    raise RuntimeError(f"part {part_index} not found in uid={uid}")
+        payload = part.get_payload(decode=True) or b""
+        p = Path(save_to).expanduser()
+        # Treat as directory if: explicit trailing slash, existing dir,
+        # or no file extension. Otherwise treat as full file path.
+        looks_like_dir = save_to.endswith(("/", os.sep)) or p.is_dir() or p.suffix == ""
+        if looks_like_dir:
+            p.mkdir(parents=True, exist_ok=True)
+            p = p / safe_filename(part.get_filename(), f"attachment-{index}.bin")
+        else:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(payload)
+        return {
+            "path": str(p),
+            "size": len(payload),
+            "mime": part.get_content_type(),
+            "filename": part.get_filename(),
+        }
+    raise RuntimeError(f"part {part_index} not found in uid={uid}; use the part numbers from read_email")
 
 
 # ----- mutating ops ----------------------------------------------------------
 
 
-def _select_writable(conn: imaplib.IMAP4_SSL, folder: str) -> None:
-    typ, _ = conn.select(quote_mailbox(folder))
-    if typ != "OK":
-        raise RuntimeError(f"SELECT {folder} failed")
+def _select_writable(conn: imaplib.IMAP4, folder: str) -> None:
+    select_folder(conn, folder, readonly=False)
 
 
-def set_flag(conn: imaplib.IMAP4_SSL, folder: str, uid: str, flag: str, on: bool) -> None:
+def set_flag(conn: imaplib.IMAP4, folder: str, uid: str, flag: str, on: bool) -> None:
     _select_writable(conn, folder)
     op = "+FLAGS" if on else "-FLAGS"
     typ, data = conn.uid("store", str(uid), op, f"({flag})")
@@ -364,7 +410,7 @@ def set_flag(conn: imaplib.IMAP4_SSL, folder: str, uid: str, flag: str, on: bool
         raise RuntimeError(f"STORE failed: {data!r}")
 
 
-def move_message(conn: imaplib.IMAP4_SSL, folder: str, uid: str, dest_folder: str) -> None:
+def move_message(conn: imaplib.IMAP4, folder: str, uid: str, dest_folder: str) -> None:
     _select_writable(conn, folder)
     # Prefer MOVE extension when supported; fall back to COPY+DELETE
     capabilities = tuple(c.decode() if isinstance(c, bytes) else c for c in (conn.capabilities or ()))
@@ -380,7 +426,7 @@ def move_message(conn: imaplib.IMAP4_SSL, folder: str, uid: str, dest_folder: st
         conn.expunge()
 
 
-def trash_message(conn: imaplib.IMAP4_SSL, folder: str, uid: str) -> str:
+def trash_message(conn: imaplib.IMAP4, folder: str, uid: str) -> str:
     trash = resolve_role(conn, "trash") or "Trash"
     move_message(conn, folder, uid, trash)
     return trash

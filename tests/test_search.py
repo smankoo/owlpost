@@ -121,3 +121,13 @@ def test_search_unknown_folder(imap_server):
     icloud_folders(imap_server)
     with make_account().imap() as c, pytest.raises(RuntimeError, match="SELECT Nope failed"):
         search(c, "Nope", ["ALL"])
+
+
+def test_raw_search_keeps_quoted_phrases_together():
+    assert build_search_criteria(raw='OR FROM "Jane Doe" SUBJECT "q3 numbers"') == [
+        "OR",
+        "FROM",
+        '"Jane Doe"',
+        "SUBJECT",
+        '"q3 numbers"',
+    ]

@@ -7,6 +7,7 @@ for owlpost's code paths. Nothing here touches the network.
 from __future__ import annotations
 
 import email
+import imaplib
 import re
 import textwrap
 from dataclasses import dataclass, field
@@ -105,14 +106,20 @@ class FakeIMAPServer:
         self.log: list[tuple] = []  # every command, in order
         self.logins: list[tuple[str, str]] = []
         self.connections = 0
+        self.timeouts: list[float | None] = []
+        # Set to an exception instance to make the next UID command raise it
+        # (e.g. imaplib.IMAP4.abort to simulate a dropped connection).
+        self.fail_next: BaseException | None = None
+        self.reject_login = False
 
     def add_folder(self, name: str, flags: str = "\\HasNoChildren") -> FakeFolder:
         folder = FakeFolder(name, flags)
         self.folders[name] = folder
         return folder
 
-    def connect(self, host, port=None, ssl_context=None, **_kw) -> FakeIMAPConn:
+    def connect(self, host, port=None, ssl_context=None, timeout=None, **_kw) -> FakeIMAPConn:
         self.connections += 1
+        self.timeouts.append(timeout)
         return FakeIMAPConn(self, host, port)
 
 
@@ -136,10 +143,20 @@ class FakeIMAPConn:
 
     def login(self, user, password):
         self.server.logins.append((user, password))
+        if self.server.reject_login:
+            raise imaplib.IMAP4.error("b'[AUTHENTICATIONFAILED] Authentication failed.'")
         return "OK", [b"LOGIN completed"]
 
     def logout(self):
+        self._log("LOGOUT")
         return "BYE", [b"logging out"]
+
+    def shutdown(self):
+        self._log("SHUTDOWN")
+
+    def noop(self):
+        self._log("NOOP")
+        return "OK", [b"NOOP completed"]
 
     # --- mailbox ---
     def list(self):
@@ -176,6 +193,9 @@ class FakeIMAPConn:
     def uid(self, command, *args):
         command = command.lower()
         self._log("UID", command, *args)
+        if self.server.fail_next is not None:
+            exc, self.server.fail_next = self.server.fail_next, None
+            raise exc
         handler = getattr(self, f"_uid_{command}", None)
         if handler is None:
             return "BAD", [f"unsupported UID {command}".encode()]
@@ -183,33 +203,39 @@ class FakeIMAPConn:
 
     def _uid_search(self, charset, *criteria):
         tokens = [_unquote(t) for t in criteria]
-        matches = list(self.selected.messages)
-        i = 0
-        while i < len(tokens):
-            tok = tokens[i].upper()
-            if tok == "ALL":
-                i += 1
-            elif tok == "HEADER":
-                hname, value = tokens[i + 1], tokens[i + 2]
-                matches = [m for m in matches if value.lower() in m.header(hname).lower()]
-                i += 3
-            elif tok == "X-GM-THRID":
-                matches = [m for m in matches if m.thrid == tokens[i + 1]]
-                i += 2
-            elif tok in ("FROM", "TO", "CC", "SUBJECT"):
-                value = tokens[i + 1].lower()
-                matches = [m for m in matches if value in m.header(tok).lower()]
-                i += 2
-            elif tok == "UNSEEN":
-                matches = [m for m in matches if "\\Seen" not in m.flags]
-                i += 1
-            else:
-                i += 1  # accepted but not filtered (dates, BODY, ...)
+        matches = [m for m in self.selected.messages if self._matches_all(m, list(tokens))]
         return "OK", [" ".join(str(m.uid) for m in matches).encode()]
+
+    def _matches_all(self, msg: FakeMessage, tokens: list[str]) -> bool:
+        ok = True
+        while tokens:
+            ok = self._match_one(msg, tokens) and ok
+        return ok
+
+    def _match_one(self, msg: FakeMessage, tokens: list[str]) -> bool:
+        """Consume one search key (recursing into OR) and evaluate it."""
+        tok = tokens.pop(0).upper()
+        if tok == "OR":
+            left = self._match_one(msg, tokens)
+            right = self._match_one(msg, tokens)
+            return left or right
+        if tok == "HEADER":
+            hname, value = tokens.pop(0), tokens.pop(0)
+            return value.lower() in msg.header(hname).lower()
+        if tok == "X-GM-THRID":
+            return msg.thrid == tokens.pop(0)
+        if tok in ("FROM", "TO", "CC", "SUBJECT"):
+            return tokens.pop(0).lower() in msg.header(tok).lower()
+        if tok == "UNSEEN":
+            return "\\Seen" not in msg.flags
+        if tok in ("BODY", "TEXT", "SINCE", "BEFORE"):
+            tokens.pop(0)  # accepted but not filtered
+        return True
 
     def _uid_fetch(self, uid_set, spec):
         out: list = []
-        for uid_s in str(uid_set).split(","):
+        # Real servers answer in mailbox order, not in the order the set was written.
+        for uid_s in sorted(str(uid_set).split(","), key=int):
             msg = self.selected.get(int(uid_s))
             if msg is None:
                 continue
@@ -261,10 +287,13 @@ class FakeIMAPConn:
 
 class FakeSMTP:
     instances: list[FakeSMTP] = []
+    # Recipients the server refuses (while accepting the rest).
+    refuse: set[str] = set()
 
-    def __init__(self, host, port=None, context=None, **_kw):
+    def __init__(self, host, port=None, context=None, timeout=None, **_kw):
         self.host = host
         self.port = port
+        self.timeout = timeout
         self.sent: list[dict] = []
         self.starttls_called = False
         self.login_args = None
@@ -284,7 +313,7 @@ class FakeSMTP:
 
     def send_message(self, msg, from_addr=None, to_addrs=None):
         self.sent.append({"msg": msg, "from_addr": from_addr, "to_addrs": list(to_addrs or [])})
-        return {}
+        return {addr: (550, b"no such user") for addr in to_addrs or [] if addr in self.refuse}
 
     def quit(self):
         self.quit_called = True
@@ -296,16 +325,17 @@ class FakeSMTP:
 @pytest.fixture
 def imap_server(monkeypatch) -> FakeIMAPServer:
     server = FakeIMAPServer()
-    monkeypatch.setattr("owlpost.account.imaplib.IMAP4_SSL", server.connect)
-    monkeypatch.setattr("owlpost.account.imaplib.IMAP4", server.connect)
+    monkeypatch.setattr("owlpost.account.IMAP4_SSL", server.connect)
+    monkeypatch.setattr("owlpost.account.IMAP4", server.connect)
     return server
 
 
 @pytest.fixture
 def smtp(monkeypatch) -> type[FakeSMTP]:
     FakeSMTP.instances = []
-    monkeypatch.setattr("owlpost.account.smtplib.SMTP", FakeSMTP)
-    monkeypatch.setattr("owlpost.account.smtplib.SMTP_SSL", FakeSMTP)
+    FakeSMTP.refuse = set()
+    monkeypatch.setattr("owlpost.account.SMTP", FakeSMTP)
+    monkeypatch.setattr("owlpost.account.SMTP_SSL", FakeSMTP)
     return FakeSMTP
 
 
@@ -363,3 +393,4 @@ def _isolate(monkeypatch):
 
     monkeypatch.setattr(server, "_config", None)
     monkeypatch.setattr(server, "_config_path", None)
+    monkeypatch.setattr(server, "_accounts", {})

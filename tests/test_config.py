@@ -235,3 +235,26 @@ def test_example_config_parses():
     assert set(cfg.accounts) == {"icloud", "gmail"}
     assert cfg.get("gmail").password_env == "OWLPOST_GMAIL_PASSWORD"
     assert cfg.get("gmail").auto_save_sent is False
+
+
+def test_password_command_runs_once_under_concurrency(write_config, monkeypatch):
+    import threading
+    import time
+
+    calls = []
+
+    def slow_secret(account, command):
+        calls.append(command)
+        time.sleep(0.1)
+        return "s3cret"
+
+    monkeypatch.setattr(config_mod, "_invoke_password_command", slow_secret)
+    acc = _account(write_config, "password_command = 'op read op://x/y'")
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(acc.resolve_password())) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results == ["s3cret"] * 5
+    assert len(calls) == 1

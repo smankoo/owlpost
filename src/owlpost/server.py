@@ -1,4 +1,4 @@
-"""owlpost MCP server entrypoint (FastMCP)."""
+"""owlpost MCP server entrypoint."""
 
 from __future__ import annotations
 
@@ -8,15 +8,23 @@ import argparse
 # imaplib's hostname encoding fails with "unknown encoding: idna" under
 # minimal/stripped environments (frozen builds, some uvx/venv setups).
 import encodings.idna  # noqa: F401
+import functools
+import imaplib
+import logging
+import re
+import smtplib
+import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import __version__
-from .account import Account
-from .config import load_config
+from .account import IMAP_TIMEOUT, TRANSIENT_ERRORS, Account
+from .config import Config, load_config
 from .folders import list_folders as imap_list_folders
 from .folders import resolve_role
 from .messages import (
@@ -28,8 +36,22 @@ from .messages import (
     set_flag,
     trash_message,
 )
+from .models import (
+    AccountInfo,
+    DraftResult,
+    Envelope,
+    FlagState,
+    Folder,
+    Message,
+    MoveResult,
+    ReadState,
+    SavedAttachment,
+    SendResult,
+)
 from .sending import forward_message, reply_message, save_draft, send_message
 from .threads import get_thread
+
+log = logging.getLogger("owlpost")
 
 INSTRUCTIONS = """\
 owlpost gives you IMAP/SMTP access to the user's configured mailboxes.
@@ -41,10 +63,20 @@ subject and body and get explicit confirmation before calling them. Prefer
 save_draft_email when the user may want to review the message first.
 """
 
-mcp = FastMCP("owlpost", instructions=INSTRUCTIONS)
-_config = None
+mcp = MCPServer(
+    "owlpost",
+    title="owlpost",
+    instructions=INSTRUCTIONS,
+    website_url="https://github.com/smankoo/owlpost",
+    version=__version__,
+)
+_config: Config | None = None
 # Set by --config; otherwise OWLPOST_CONFIG or the default path is used.
 _config_path: Path | None = None
+# One Account (and so one connection pool) per configured account.
+_accounts: dict[str, Account] = {}
+# Tools run concurrently on worker threads.
+_state_lock = threading.Lock()
 
 # Annotation presets. "Open world" is reserved for tools that reach people
 # outside the user's mailbox (i.e. anything that sends mail).
@@ -55,28 +87,87 @@ _SENDS_MAIL = {
     "idempotentHint": False,
     "openWorldHint": True,
 }
+_SETS_FLAG = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
+_MOVES_MAIL = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+    "openWorldHint": False,
+}
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 
-def _annotations(title: str, **hints: bool) -> ToolAnnotations:
-    return ToolAnnotations(title=title, **hints)
+def _describe(e: BaseException) -> str:
+    """A message for the model. mcp hides the text of unexpected exceptions."""
+    if isinstance(e, KeyError) and e.args:
+        return str(e.args[0])
+    if isinstance(e, TimeoutError):
+        return f"The mail server did not respond within {IMAP_TIMEOUT}s; try again shortly"
+    if isinstance(e, imaplib.IMAP4.error):
+        # imaplib wraps server replies as the repr of bytes: "b'[AUTH...] ...'".
+        text = re.sub(r"""\bb(['"])(.*?)\1""", r"\2", str(e))
+        return f"IMAP error: {text}"
+    if isinstance(e, smtplib.SMTPException):
+        return f"SMTP error: {e}"
+    if isinstance(e, (RuntimeError, ValueError, OSError)):
+        return str(e)
+    return f"{type(e).__name__}: {e}"
 
 
-def _load() -> Any:
+def _tool(title: str, **hints: bool) -> Callable[[F], F]:
+    """Register a tool with annotations, readable errors and transient-error retry.
+
+    Idempotent tools are retried once on a fresh connection when the server
+    drops the connection mid-operation; others never are, since a retry
+    could repeat a send or a move.
+    """
+    attempts = 2 if hints.get("idempotentHint") else 1
+
+    def decorate(fn: F) -> F:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            for attempt in range(1, attempts + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except ToolError:
+                    raise
+                except TRANSIENT_ERRORS as e:
+                    if attempt < attempts:
+                        log.warning("%s: connection dropped (%r); retrying", fn.__name__, e)
+                        continue
+                    raise ToolError(f"Lost the connection to the mail server: {_describe(e)}") from e
+                except Exception as e:
+                    raise ToolError(_describe(e)) from e
+
+        mcp.tool(annotations=ToolAnnotations(title=title, **hints))(wrapper)
+        return fn
+
+    return decorate
+
+
+def _load() -> Config:
     global _config
-    if _config is None:
-        _config = load_config(_config_path)
-    return _config
+    with _state_lock:
+        if _config is None:
+            _config = load_config(_config_path)
+        return _config
 
 
 def _get_account(name: str) -> Account:
-    return Account(_load().get(name))
+    cfg = _load().get(name)
+    with _state_lock:
+        acc = _accounts.get(name)
+        if acc is None or acc.cfg is not cfg:
+            acc = _accounts[name] = Account(cfg)
+        return acc
 
 
 # ----- account / folder discovery --------------------------------------------
 
 
-@mcp.tool(annotations=_annotations("List accounts", **_READ_ONLY))
-def list_accounts() -> list[dict]:
+@_tool("List accounts", **_READ_ONLY)
+def list_accounts() -> list[AccountInfo]:
     """List the mail accounts configured in owlpost's accounts.toml.
 
     Returns one entry per account with its `name` (the value to pass as
@@ -98,8 +189,8 @@ def list_accounts() -> list[dict]:
     ]
 
 
-@mcp.tool(annotations=_annotations("List folders", **_READ_ONLY))
-def list_folders(account: str) -> list[dict]:
+@_tool("List folders", **_READ_ONLY)
+def list_folders(account: str) -> list[Folder]:
     """List every IMAP folder (mailbox) in an account.
 
     Each entry has the folder `name` to use in other tools, its raw IMAP
@@ -115,7 +206,7 @@ def list_folders(account: str) -> list[dict]:
         return imap_list_folders(c)
 
 
-@mcp.tool(annotations=_annotations("Resolve folder role", **_READ_ONLY))
+@_tool("Resolve folder role", **_READ_ONLY)
 def resolve_folder(account: str, role: str) -> str | None:
     """Resolve a special-use role to the provider-specific folder name.
 
@@ -136,7 +227,7 @@ def resolve_folder(account: str, role: str) -> str | None:
 # ----- search / read ---------------------------------------------------------
 
 
-@mcp.tool(annotations=_annotations("Search messages", **_READ_ONLY))
+@_tool("Search messages", **_READ_ONLY)
 def search_messages(
     account: str,
     folder: str = "INBOX",
@@ -154,7 +245,7 @@ def search_messages(
     has_attachment: bool = False,
     raw: str | None = None,
     limit: int = 50,
-) -> list[dict]:
+) -> list[Envelope]:
     """Search one folder with structured filters and return message envelopes, newest first.
 
     All filters are combined with AND. String filters use IMAP
@@ -204,7 +295,7 @@ def search_messages(
         return search(c, folder, criteria, limit=limit)
 
 
-@mcp.tool(annotations=_annotations("Read email", **_READ_ONLY))
+@_tool("Read email", **_READ_ONLY)
 def read_email(
     account: str,
     folder: str,
@@ -212,7 +303,7 @@ def read_email(
     include_html: bool = False,
     include_text: bool = True,
     body_max_chars: int = 50_000,
-) -> dict[str, Any]:
+) -> Message:
     """Read one message: decoded headers, body and attachment list, without marking it read.
 
     By default only the plain-text body is returned, truncated at 50,000
@@ -243,12 +334,8 @@ def read_email(
         )
 
 
-@mcp.tool(
-    annotations=_annotations(
-        "Save attachment", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
-    )
-)
-def save_attachment(account: str, folder: str, uid: str, part: int, save_to: str) -> dict:
+@_tool("Save attachment", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+def save_attachment(account: str, folder: str, uid: str, part: int, save_to: str) -> SavedAttachment:
     """Download one attachment from a message and write it to the local filesystem.
 
     The mailbox is not modified. Returns the written path, size, MIME type
@@ -273,13 +360,13 @@ def save_attachment(account: str, folder: str, uid: str, part: int, save_to: str
 # ----- conversation following ------------------------------------------------
 
 
-@mcp.tool(annotations=_annotations("Get conversation", **_READ_ONLY))
+@_tool("Get conversation", **_READ_ONLY)
 def get_conversation(
     account: str,
     message_id: str | None = None,
     folder: str | None = None,
     uid: str | None = None,
-) -> list[dict]:
+) -> list[Envelope]:
     """Return every message in the same conversation as a given message, oldest first.
 
     On Gmail this uses the X-GM-THRID thread id across All Mail. Elsewhere it
@@ -302,7 +389,7 @@ def get_conversation(
 # ----- send / reply / forward ------------------------------------------------
 
 
-@mcp.tool(annotations=_annotations("Send email", **_SENDS_MAIL))
+@_tool("Send email", **_SENDS_MAIL)
 def send_email(
     account: str,
     to: list[str],
@@ -314,7 +401,7 @@ def send_email(
     attachments: list[str] | None = None,
     in_reply_to: str | None = None,
     references: list[str] | None = None,
-) -> dict:
+) -> SendResult:
     """Send a new email over SMTP immediately; this cannot be undone, so confirm with the user first.
 
     When the account has auto_save_sent enabled (needed for iCloud, whose
@@ -350,11 +437,7 @@ def send_email(
     )
 
 
-@mcp.tool(
-    annotations=_annotations(
-        "Save draft", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
-    )
-)
+@_tool("Save draft", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
 def save_draft_email(
     account: str,
     to: list[str],
@@ -366,7 +449,7 @@ def save_draft_email(
     attachments: list[str] | None = None,
     in_reply_to: str | None = None,
     references: list[str] | None = None,
-) -> dict:
+) -> DraftResult:
     """Compose an email and save it to the account's Drafts folder without sending it.
 
     The message is appended to the special-use Drafts folder with the
@@ -401,7 +484,7 @@ def save_draft_email(
     )
 
 
-@mcp.tool(annotations=_annotations("Reply to email", **_SENDS_MAIL))
+@_tool("Reply to email", **_SENDS_MAIL)
 def reply_email(
     account: str,
     folder: str,
@@ -410,7 +493,7 @@ def reply_email(
     reply_all: bool = False,
     html: str | None = None,
     attachments: list[str] | None = None,
-) -> dict:
+) -> SendResult:
     """Reply to a message and send the reply immediately; confirm with the user first.
 
     Addresses the reply to the original sender (plus the original To/Cc,
@@ -439,7 +522,7 @@ def reply_email(
     )
 
 
-@mcp.tool(annotations=_annotations("Forward email", **_SENDS_MAIL))
+@_tool("Forward email", **_SENDS_MAIL)
 def forward_email(
     account: str,
     folder: str,
@@ -450,7 +533,7 @@ def forward_email(
     bcc: list[str] | None = None,
     attachments: list[str] | None = None,
     include_attachments: bool = True,
-) -> dict:
+) -> SendResult:
     """Forward a message to new recipients and send it immediately; confirm with the user first.
 
     The subject gets a "Fwd:" prefix, the original headers and plain-text
@@ -486,11 +569,8 @@ def forward_email(
 # ----- flags / move / delete -------------------------------------------------
 
 
-_SETS_FLAG = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
-
-
-@mcp.tool(annotations=_annotations("Mark read/unread", **_SETS_FLAG))
-def mark_read(account: str, folder: str, uid: str, read: bool = True) -> dict:
+@_tool("Mark read/unread", **_SETS_FLAG)
+def mark_read(account: str, folder: str, uid: str, read: bool = True) -> ReadState:
     """Mark a message as read or unread by setting or clearing its \\Seen flag.
 
     Args:
@@ -505,8 +585,8 @@ def mark_read(account: str, folder: str, uid: str, read: bool = True) -> dict:
     return {"uid": uid, "folder": folder, "seen": read}
 
 
-@mcp.tool(annotations=_annotations("Flag message", **_SETS_FLAG))
-def flag_message(account: str, folder: str, uid: str, flagged: bool = True) -> dict:
+@_tool("Flag message", **_SETS_FLAG)
+def flag_message(account: str, folder: str, uid: str, flagged: bool = True) -> FlagState:
     """Flag (star) or unflag a message by setting or clearing its \\Flagged flag.
 
     Args:
@@ -521,16 +601,8 @@ def flag_message(account: str, folder: str, uid: str, flagged: bool = True) -> d
     return {"uid": uid, "folder": folder, "flagged": flagged}
 
 
-_MOVES_MAIL = {
-    "readOnlyHint": False,
-    "destructiveHint": True,
-    "idempotentHint": False,
-    "openWorldHint": False,
-}
-
-
-@mcp.tool(annotations=_annotations("Move email", **_MOVES_MAIL))
-def move_email(account: str, folder: str, uid: str, dest_folder: str) -> dict:
+@_tool("Move email", **_MOVES_MAIL)
+def move_email(account: str, folder: str, uid: str, dest_folder: str) -> MoveResult:
     """Move a message from one folder to another.
 
     Uses IMAP MOVE when the server supports it, otherwise COPY followed by
@@ -549,8 +621,8 @@ def move_email(account: str, folder: str, uid: str, dest_folder: str) -> dict:
     return {"uid": uid, "from": folder, "to": dest_folder}
 
 
-@mcp.tool(annotations=_annotations("Delete email", **_MOVES_MAIL))
-def delete_email(account: str, folder: str, uid: str) -> dict:
+@_tool("Delete email", **_MOVES_MAIL)
+def delete_email(account: str, folder: str, uid: str) -> MoveResult:
     """Delete a message by moving it to the account's Trash folder.
 
     The Trash folder is discovered via SPECIAL-USE (e.g. "Deleted Messages"
