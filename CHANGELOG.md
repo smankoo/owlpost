@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-01
+
+### Changed
+- Package metadata no longer publishes an author email address.
+
 ## [0.2.0] - 2026-10-18
 
 Tool names, argument names and defaults are unchanged; existing configs keep
@@ -81,7 +86,8 @@ working as-is.
   move and delete. Special-use folder discovery and iCloud/Gmail quirk
   handling.
 
-[Unreleased]: https://github.com/smankoo/owlpost/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/smankoo/owlpost/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/smankoo/owlpost/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/smankoo/owlpost/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/smankoo/owlpost/compare/a50a67b...v0.1.4
 [0.1.3]: https://github.com/smankoo/owlpost/compare/v0.1.2...a50a67b
