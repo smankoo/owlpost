@@ -6,6 +6,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Tool names, arguments and defaults are unchanged; existing configs keep
+working as-is.
+
+### Changed
+- Built on the MCP Python SDK 2.x (`mcp>=2.3,<3`). Clients on both the
+  2025-era `initialize` handshake and the 2026-07-28 protocol are supported.
+- IMAP connections are pooled per account: a logged-in session is reused for
+  up to 60 seconds, health-checked with NOOP first and discarded after any
+  error. Typical search → read → thread sequences are 2–5× faster, and
+  iCloud's reconnect throttling is hit far less often.
+- `get_conversation` searches each folder once per round for every newly
+  discovered Message-ID (OR'd together) and fetches envelopes in batches,
+  instead of three searches and one fetch per message per folder. Its results
+  now also include `flags`, `seen`, `flagged` and `size`.
+- `forward_email` downloads the original message once rather than once per
+  attachment, and no longer leaves copies of the attachments in a temporary
+  directory.
+- `resolve_role` lookups reuse the connection's folder list for five minutes.
+- Every tool publishes an MCP output schema; `read_email` results also include
+  `seen` and `flagged`.
+- Sync tools run on worker threads (an SDK 2.x change), so concurrent calls no
+  longer block one another; shared state is now thread-safe.
+
+### Added
+- `refused_recipients` in send/reply/forward results, listing addresses the
+  SMTP server rejected while accepting the others.
+- A `warning` in send/reply/forward results when the mail was sent but saving
+  the copy to Sent failed. This used to be a tool error, which invited a
+  retry and a duplicate send.
+
+### Fixed
+- IMAP and SMTP sockets now time out (30 s / 60 s) instead of hanging a tool
+  call forever when a server stops responding.
+- Idempotent tools retry once on a fresh connection when the server drops the
+  connection mid-call; tools that send or move mail never retry.
+- Error messages reach the model again. SDK 2.x replaces the text of an
+  unexpected exception with "Error executing tool"; owlpost now reports e.g.
+  "Unknown account", "SELECT Nope failed" or the server's IMAP error.
+- `search_messages` returns newest first on servers that answer FETCH in
+  ascending UID order (most of them), as documented.
+- Attachment filenames are reduced to a bare name before saving, so a
+  filename like `../../.zshrc` in an email cannot write outside the target
+  directory.
+- `raw` searches keep quoted phrases (`FROM "Jane Doe"`) as one argument.
+- A missing local attachment path fails with a clear error before anything
+  is sent.
+- Concurrent tool calls run `password_command` only once.
+
 ## [0.2.1] - 2026-11-01
 
 ### Changed

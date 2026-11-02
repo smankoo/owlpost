@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import threading
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,9 @@ _PASSWORD_KEYS = ("password", "password_env", "password_command")
 # password_command results, cached per process so that a reply (which opens
 # several IMAP/SMTP sessions) doesn't re-run the secret manager each time.
 _command_cache: dict[str, str] = {}
+# Tools run concurrently on worker threads; serialise so that parallel calls
+# don't each launch the secret manager (and each prompt for unlock).
+_command_lock = threading.Lock()
 
 
 class ConfigError(ValueError):
@@ -35,8 +39,13 @@ def config_path() -> Path:
 
 
 def _run_password_command(account: str, command: str) -> str:
-    if command in _command_cache:
+    with _command_lock:
+        if command not in _command_cache:
+            _command_cache[command] = _invoke_password_command(account, command)
         return _command_cache[command]
+
+
+def _invoke_password_command(account: str, command: str) -> str:
     try:
         argv = shlex.split(command)
     except ValueError as e:
@@ -64,7 +73,6 @@ def _run_password_command(account: str, command: str) -> str:
     secret = proc.stdout.rstrip("\r\n")
     if not secret:
         raise ConfigError(f"account '{account}': password_command produced no output")
-    _command_cache[command] = secret
     return secret
 
 

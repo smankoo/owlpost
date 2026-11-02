@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import imaplib
 import re
+import time
 
 # Map our friendly role names to IMAP SPECIAL-USE flags.
 SPECIAL_USE_FLAGS = {
@@ -23,6 +24,10 @@ SPECIAL_USE_FLAGS = {
 }
 
 # LIST response: (\HasNoChildren \Sent) "/" "Sent Messages"
+# resolve_role() reuses a connection's LIST result for this long. Pooled
+# connections live for minutes, and folders are rarely renamed under us.
+FOLDER_CACHE_SECONDS = 300
+
 _LIST_RE = re.compile(rb'\((?P<flags>[^)]*)\) "(?P<delim>[^"]*)" (?P<name>.+)')
 
 
@@ -38,8 +43,16 @@ def _decode_mailbox_name(raw: bytes) -> str:
         return raw.decode("latin-1")
 
 
-def list_folders(conn: imaplib.IMAP4_SSL) -> list[dict]:
-    """Return [{name, flags, delimiter, role}] for every folder."""
+def list_folders(conn: imaplib.IMAP4, *, cached: bool = False) -> list[dict]:
+    """Return [{name, flags, delimiter, role}] for every folder.
+
+    With cached=True, a LIST result this connection fetched in the last
+    FOLDER_CACHE_SECONDS is reused. A fresh LIST always refreshes the cache.
+    """
+    if cached:
+        hit = getattr(conn, "_owlpost_folders", None)
+        if hit is not None and time.monotonic() - hit[0] < FOLDER_CACHE_SECONDS:
+            return hit[1]
     typ, data = conn.list()
     if typ != "OK":
         raise RuntimeError(f"LIST failed: {typ}")
@@ -62,15 +75,17 @@ def list_folders(conn: imaplib.IMAP4_SSL) -> list[dict]:
         if role is None and name.upper() == "INBOX":
             role = "inbox"
         out.append({"name": name, "flags": flags, "delimiter": delim, "role": role})
+    conn._owlpost_folders = (time.monotonic(), out)
     return out
 
 
-def resolve_role(conn: imaplib.IMAP4_SSL, role: str) -> str | None:
+def resolve_role(conn: imaplib.IMAP4, role: str) -> str | None:
     """Return the folder name for a given role, or None if not found."""
     role = role.lower()
     if role == "inbox":
         return "INBOX"
-    for f in list_folders(conn):
+    folders = list_folders(conn, cached=True)
+    for f in folders:
         if f["role"] == role:
             return f["name"]
     # Common fallbacks
@@ -80,7 +95,7 @@ def resolve_role(conn: imaplib.IMAP4_SSL, role: str) -> str | None:
         "drafts": ["Drafts", "[Gmail]/Drafts"],
         "all": ["[Gmail]/All Mail", "All Mail", "Archive"],
     }
-    known = {f["name"] for f in list_folders(conn)}
+    known = {f["name"] for f in folders}
     for candidate in fallbacks.get(role, []):
         if candidate in known:
             return candidate

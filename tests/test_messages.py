@@ -182,7 +182,7 @@ def test_move_uses_move_extension(mailbox):
 @pytest.mark.parametrize("caps", [("IMAP4REV1",), (b"IMAP4REV1", b"UIDPLUS")])
 def test_move_fallback_copy_store_expunge(monkeypatch, caps):
     server = FakeIMAPServer(capabilities=caps)
-    monkeypatch.setattr("owlpost.account.imaplib.IMAP4_SSL", server.connect)
+    monkeypatch.setattr("owlpost.account.IMAP4_SSL", server.connect)
     icloud_folders(server)
     keep = server.folders["INBOX"].add(make_message(message_id="<keep@example.com>"))
     uid = server.folders["INBOX"].add(make_message(message_id="<go@example.com>"))
@@ -201,7 +201,7 @@ def test_move_fallback_copy_store_expunge(monkeypatch, caps):
 
 def test_move_with_bytes_capabilities_still_uses_move(monkeypatch):
     server = FakeIMAPServer(capabilities=(b"IMAP4REV1", b"MOVE"))
-    monkeypatch.setattr("owlpost.account.imaplib.IMAP4_SSL", server.connect)
+    monkeypatch.setattr("owlpost.account.IMAP4_SSL", server.connect)
     icloud_folders(server)
     uid = server.folders["INBOX"].add(make_message())
     with make_account().imap() as c:
@@ -215,3 +215,14 @@ def test_trash_resolves_provider_folder(imap_server):
     with make_account().imap() as c:
         assert trash_message(c, "INBOX", str(uid)) == "[Gmail]/Trash"
     assert len(imap_server.folders["[Gmail]/Trash"].messages) == 1
+
+
+def test_hostile_attachment_name_stays_inside_the_directory(mailbox, tmp_path):
+    uid = mailbox.folders["INBOX"].add(
+        make_message(attachments=[("../../escape.txt", b"gotcha", "text/plain")])
+    )
+    out = tmp_path / "inbox-files"
+    with make_account().imap() as c:
+        info = download_attachment(c, "INBOX", str(uid), 2, str(out) + "/")
+    assert info["path"] == str(out / "escape.txt")
+    assert not (tmp_path / "escape.txt").exists()

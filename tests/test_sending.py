@@ -225,3 +225,62 @@ def test_save_draft_without_drafts_folder(imap_server, smtp):
     imap_server.add_folder("INBOX")
     with pytest.raises(RuntimeError, match="No Drafts folder"):
         save_draft(make_account(), to=["b@example.com"], subject="s", body="b")
+
+
+def test_forward_fetches_the_original_once_and_writes_no_temp_files(icloud, smtp, tmp_path, monkeypatch):
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    uid = _original(
+        icloud,
+        attachments=[("a.pdf", b"%PDF-a", "application/pdf"), ("b.png", b"\x89PNG", "image/png")],
+    )
+    forward_message(make_account(), folder="INBOX", uid=str(uid), to=["frank@example.com"])
+    fetches = [e for e in icloud.log if e[:2] == ("UID", "fetch")]
+    assert len(fetches) == 1
+    msg = _parse(smtp.instances[0].sent[0]["msg"].as_bytes())
+    assert [(a.get_filename(), a.get_content_type()) for a in msg.iter_attachments()] == [
+        ("a.pdf", "application/pdf"),
+        ("b.png", "image/png"),
+    ]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_forward_sanitises_hostile_attachment_names(icloud, smtp):
+    uid = _original(icloud, attachments=[("../../.zshrc", b"evil", "text/plain")])
+    forward_message(make_account(), folder="INBOX", uid=str(uid), to=["frank@example.com"])
+    (att,) = _parse(smtp.instances[0].sent[0]["msg"].as_bytes()).iter_attachments()
+    assert att.get_filename() == ".zshrc"
+
+
+# ----- failure modes after the mail has gone out ------------------------------
+
+
+def test_sent_copy_failure_is_a_warning_not_an_error(icloud, smtp, monkeypatch):
+    def broken_append(self, mailbox, flags, date_time, message):
+        return "NO", [b"[OVERQUOTA] Mailbox is full"]
+
+    monkeypatch.setattr("conftest.FakeIMAPConn.append", broken_append)
+    result = send_message(make_account(), to=["bob@example.com"], subject="Hi", body="x")
+    assert len(smtp.instances[0].sent) == 1
+    assert result["saved_to_folder"] is None
+    assert "OVERQUOTA" in result["warning"]
+
+
+def test_partially_refused_recipients_are_reported(icloud, smtp):
+    smtp.refuse = {"typo@exmaple.com"}
+    result = send_message(make_account(), to=["bob@example.com", "typo@exmaple.com"], subject="Hi", body="x")
+    assert result["refused_recipients"] == ["typo@exmaple.com"]
+
+
+def test_missing_attachment_fails_before_sending(icloud, smtp, tmp_path):
+    with pytest.raises(FileNotFoundError, match="attachment not found"):
+        send_message(
+            make_account(),
+            to=["bob@example.com"],
+            subject="Hi",
+            body="x",
+            attachments=[str(tmp_path / "nope.pdf")],
+        )
+    assert smtp.instances == []
