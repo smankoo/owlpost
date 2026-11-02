@@ -8,7 +8,8 @@ updates:
       actions:
         patterns: ["*"]
 
-  - package-ecosystem: pip
+  # uv (not pip) so Dependabot also updates uv.lock; CI runs `uv sync --locked`.
+  - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly
@@ -18,4 +19,4 @@ updates:
     ignore:
       # owlpost is built on FastMCP from mcp 1.x; mcp 2.x is a breaking rewrite.
       - dependency-name: mcp
-        update-types: ["version-update:semver-major"]
+        versions: [">=2"]
