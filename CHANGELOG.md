@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
 Tool names, arguments and defaults are unchanged; existing configs keep
 working as-is.
 
@@ -134,7 +136,8 @@ working as-is.
   move and delete. Special-use folder discovery and iCloud/Gmail quirk
   handling.
 
-[Unreleased]: https://github.com/smankoo/owlpost/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/smankoo/owlpost/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/smankoo/owlpost/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/smankoo/owlpost/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/smankoo/owlpost/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/smankoo/owlpost/compare/a50a67b...v0.1.4
