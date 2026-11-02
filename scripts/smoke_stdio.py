@@ -1,4 +1,7 @@
-"""Launch owlpost over stdio and check initialize + tools/list.
+"""Launch owlpost over stdio and check the handshake, tools/list and a tool call.
+
+Both connection modes are exercised: the pre-2026 initialize handshake most
+clients still use, and the 2026-07-28 server/discover negotiation.
 
 Usage: python scripts/smoke_stdio.py [command [args...]]   (default: owlpost)
 
@@ -21,8 +24,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import StdioServerParameters
+from mcp.client import Client
 
 EXPECTED_TOOLS = {
     "list_accounts",
@@ -52,6 +55,36 @@ smtp_host = "smtp.invalid"
 """
 
 
+async def check(params: StdioServerParameters, mode: str) -> dict:
+    async with Client(params, mode=mode) as client:
+        assert client.server_info is not None and client.server_info.name == "owlpost", client.server_info
+        assert client.instructions and "confirmation" in client.instructions
+
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+        missing = EXPECTED_TOOLS - tools.keys()
+        extra = tools.keys() - EXPECTED_TOOLS
+        assert not missing and not extra, f"missing={sorted(missing)} extra={sorted(extra)}"
+        for name, tool in tools.items():
+            assert tool.description and tool.annotations, f"{name} lacks description/annotations"
+            assert tool.output_schema, f"{name} lacks an output schema"
+        assert tools["delete_email"].annotations.destructive_hint is True
+        assert tools["send_email"].annotations.open_world_hint is True
+        assert tools["search_messages"].annotations.read_only_hint is True
+
+        result = await client.call_tool("list_accounts", {})
+        assert not result.is_error, result
+        payload = json.dumps([c.model_dump() for c in result.content])
+        assert "demo" in payload
+        assert "smoke-test-not-a-real-password" not in payload
+        assert result.structured_content["result"][0]["name"] == "demo"
+
+        # Errors must reach the model with their real message.
+        result = await client.call_tool("list_folders", {"account": "nope"})
+        assert result.is_error and "Unknown account 'nope'" in result.content[0].text, result
+        print(f"ok ({mode}, protocol {client.protocol_version})")
+    return tools
+
+
 async def run(command: list[str]) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config = Path(tmp) / "accounts.toml"
@@ -65,26 +98,8 @@ async def run(command: list[str]) -> None:
             args=args,
             env={**os.environ, "OWLPOST_CONFIG": str(config)},
         )
-        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
-            init = await session.initialize()
-            assert init.serverInfo.name == "owlpost", init.serverInfo
-            assert init.instructions and "confirmation" in init.instructions
-
-            tools = {t.name: t for t in (await session.list_tools()).tools}
-            missing = EXPECTED_TOOLS - tools.keys()
-            extra = tools.keys() - EXPECTED_TOOLS
-            assert not missing and not extra, f"missing={sorted(missing)} extra={sorted(extra)}"
-            for name, tool in tools.items():
-                assert tool.description and tool.annotations, f"{name} lacks description/annotations"
-            assert tools["delete_email"].annotations.destructiveHint is True
-            assert tools["send_email"].annotations.openWorldHint is True
-            assert tools["search_messages"].annotations.readOnlyHint is True
-
-            result = await session.call_tool("list_accounts", {})
-            assert not result.isError, result
-            payload = json.dumps([c.model_dump() for c in result.content])
-            assert "demo" in payload
-            assert "smoke-test-not-a-real-password" not in payload
+        for mode in ("legacy", "auto"):
+            tools = await check(params, mode)
 
     print(f"ok: {len(tools)} tools: {', '.join(sorted(tools))}")
 

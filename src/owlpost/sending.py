@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import email
 import imaplib
 import mimetypes
 import time
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from .account import Account
 from .folders import quote_mailbox, resolve_role
-from .messages import read_message
+from .messages import fetch_raw, is_attachment, leaf_parts, parse_message, read_message, safe_filename
 
 
 def _build_message(
@@ -27,8 +28,13 @@ def _build_message(
     attachments: list[str] | None,
     in_reply_to: str | None,
     references: list[str] | None,
+    attachment_parts: list[tuple[bytes, str, str]] | None = None,
 ) -> EmailMessage:
-    """Build an EmailMessage with CRLF policy so IMAP APPEND works."""
+    """Build an EmailMessage with CRLF policy so IMAP APPEND works.
+
+    `attachments` are local file paths; `attachment_parts` are in-memory
+    (data, mime type, filename) triples, e.g. the parts of a forwarded message.
+    """
     msg = EmailMessage(policy=policy.SMTP)
     msg["From"] = from_addr
     msg["To"] = ", ".join(to)
@@ -53,12 +59,16 @@ def _build_message(
     else:
         msg.set_content(body or "")
 
+    parts = list(attachment_parts or [])
     for path in attachments or []:
         p = Path(path).expanduser()
-        data = p.read_bytes()
+        if not p.is_file():
+            raise FileNotFoundError(f"attachment not found: {p}")
         ctype, _ = mimetypes.guess_type(str(p))
-        maintype, subtype = (ctype or "application/octet-stream").split("/", 1)
-        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=p.name)
+        parts.append((p.read_bytes(), ctype or "application/octet-stream", p.name))
+    for data, ctype, filename in parts:
+        maintype, subtype = ctype.split("/", 1) if "/" in ctype else ("application", "octet-stream")
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
     return msg
 
 
@@ -147,6 +157,7 @@ def send_message(
     attachments: list[str] | None = None,
     in_reply_to: str | None = None,
     references: list[str] | None = None,
+    attachment_parts: list[tuple[bytes, str, str]] | None = None,
 ) -> dict:
     msg = _build_message(
         from_addr=account.cfg.email,
@@ -159,21 +170,30 @@ def send_message(
         attachments=attachments,
         in_reply_to=in_reply_to,
         references=references,
+        attachment_parts=attachment_parts,
     )
     recipients = list(to) + list(cc or []) + list(bcc or [])
     with account.smtp() as s:
-        s.send_message(msg, from_addr=account.cfg.email, to_addrs=recipients)
-    saved_to = _append_to_sent(account, msg)
-    return {
+        # Raises if every recipient is refused; otherwise returns the refused ones.
+        refused = s.send_message(msg, from_addr=account.cfg.email, to_addrs=recipients) or {}
+    result = {
         "message_id": msg["Message-ID"],
         "from": account.cfg.email,
         "to": to,
         "cc": cc or [],
         "bcc": bcc or [],
         "subject": subject,
-        "saved_to_folder": saved_to,
+        "saved_to_folder": None,
         "size_bytes": len(msg.as_bytes()),
+        "refused_recipients": sorted(refused),
     }
+    # The mail has gone out. A failure from here on must not surface as a
+    # tool error, or the caller may reasonably retry and send it twice.
+    try:
+        result["saved_to_folder"] = _append_to_sent(account, msg)
+    except Exception as e:
+        result["warning"] = f"Sent, but saving a copy to the Sent folder failed: {e}"
+    return result
 
 
 # ----- reply / forward -------------------------------------------------------
@@ -256,12 +276,9 @@ def forward_message(
     include_attachments: bool = True,
 ) -> dict:
     """Forward a message. Original attachments are re-attached by default."""
-    import tempfile
-
-    from .messages import download_attachment
-
     with account.imap() as c:
-        original = read_message(c, folder, uid)
+        raw, flags = fetch_raw(c, folder, uid)
+    original = parse_message(raw, folder=folder, uid=uid, flags=flags)
 
     subject = _normalize_subject("Fwd:", original.get("subject") or "")
     sender = (original.get("from") or [{}])[0]
@@ -274,13 +291,18 @@ def forward_message(
     )
     full_body = body + intro + (original.get("text") or "")
 
-    fwd_attachments = list(attachments or [])
-    if include_attachments and original.get("attachments"):
-        tmpdir = Path(tempfile.mkdtemp(prefix="owlpost-fwd-"))
-        with account.imap() as c:
-            for att in original["attachments"]:
-                info = download_attachment(c, folder, uid, att["part"], str(tmpdir))
-                fwd_attachments.append(info["path"])
+    parts: list[tuple[bytes, str, str]] = []
+    if include_attachments:
+        msg = email.message_from_bytes(raw, policy=policy.default)
+        for index, part in leaf_parts(msg):
+            if is_attachment(part):
+                parts.append(
+                    (
+                        part.get_payload(decode=True) or b"",
+                        part.get_content_type(),
+                        safe_filename(part.get_filename(), f"attachment-{index}.bin"),
+                    )
+                )
 
     return send_message(
         account,
@@ -289,5 +311,6 @@ def forward_message(
         bcc=bcc,
         subject=subject,
         body=full_body,
-        attachments=fwd_attachments,
+        attachments=attachments,
+        attachment_parts=parts,
     )

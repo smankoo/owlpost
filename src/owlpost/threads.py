@@ -7,8 +7,9 @@ Two strategies:
   and then SEARCH for it across [Gmail]/All Mail.
 
 * **Generic / iCloud**: walk Message-ID + In-Reply-To + References across
-  the inbox and sent folder. We BFS the reference graph until no new
-  message-ids are discovered.
+  the inbox, sent, archive, all-mail and drafts folders. Each round searches
+  every folder once for the whole frontier of newly discovered message-ids,
+  until no new ones turn up.
 """
 
 from __future__ import annotations
@@ -20,26 +21,33 @@ from email import policy
 
 from .account import Account
 from .folders import quote_mailbox, resolve_role
-from .messages import _envelope_from_msg
+from .messages import fetch_envelopes
+
+# Message-ids per SEARCH command (each becomes three OR'd HEADER terms).
+_SEARCH_CHUNK = 10
+# Stop walking after this many rounds; real threads converge in a few.
+_MAX_ROUNDS = 25
 
 
-def _fetch_envelope(conn: imaplib.IMAP4_SSL, folder: str, uid: bytes | str) -> dict | None:
-    typ, data = conn.uid(
-        "fetch",
-        uid if isinstance(uid, str) else uid.decode(),
-        "(BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES)] FLAGS)",
-    )
-    if typ != "OK" or not data:
-        return None
-    for item in data:
+def _quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _seed_message_id(conn: imaplib.IMAP4, folder: str, uid: str) -> str | None:
+    typ, _ = conn.select(quote_mailbox(folder), readonly=True)
+    if typ != "OK":
+        raise RuntimeError(f"SELECT {folder} failed (does the folder exist? see list_folders)")
+    typ, data = conn.uid("fetch", str(uid), "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+    for item in data or []:
         if isinstance(item, tuple):
-            meta, header_bytes = item
-            msg = email.message_from_bytes(header_bytes, policy=policy.default)
-            uid_m = re.search(rb"UID (\d+)", meta)
-            env = _envelope_from_msg(msg, uid=uid_m.group(1).decode() if uid_m else None)
-            env["folder"] = folder
-            return env
+            msg = email.message_from_bytes(item[1], policy=policy.default)
+            return (msg.get("Message-ID") or "").strip() or None
     return None
+
+
+def _uids(data) -> list[bytes]:
+    return data[0].split() if data and data[0] else []
 
 
 def get_thread_gmail(
@@ -47,59 +55,49 @@ def get_thread_gmail(
 ) -> list[dict]:
     with account.imap() as c:
         all_mail = resolve_role(c, "all") or "[Gmail]/All Mail"
-        c.select(quote_mailbox(all_mail), readonly=True)
-
-        # Locate the seed UID in [Gmail]/All Mail
-        seed_uid = None
-        if message_id:
-            typ, data = c.uid("search", None, "HEADER", "Message-ID", message_id)
-            if typ == "OK" and data and data[0]:
-                seed_uid = data[0].split()[0].decode()
-        elif uid and folder:
-            # Need to translate folder/uid to All Mail uid via Message-ID
-            c.select(quote_mailbox(folder), readonly=True)
-            typ, data = c.uid(
-                "fetch",
-                str(uid),
-                "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
-            )
-            for item in data or []:
-                if isinstance(item, tuple):
-                    msg = email.message_from_bytes(item[1], policy=policy.default)
-                    mid = (msg.get("Message-ID") or "").strip()
-                    if mid:
-                        c.select(quote_mailbox(all_mail), readonly=True)
-                        typ, data = c.uid("search", None, "HEADER", "Message-ID", mid)
-                        if typ == "OK" and data and data[0]:
-                            seed_uid = data[0].split()[0].decode()
-        if not seed_uid:
+        if not message_id and uid and folder:
+            message_id = _seed_message_id(c, folder, uid)
+        if not message_id:
             return []
 
-        typ, data = c.uid("fetch", seed_uid, "(X-GM-THRID)")
+        typ, _ = c.select(quote_mailbox(all_mail), readonly=True)
+        if typ != "OK":
+            raise RuntimeError(f"SELECT {all_mail} failed")
+        typ, data = c.uid("search", None, "HEADER", "Message-ID", _quote(message_id))
+        seed = _uids(data)[:1] if typ == "OK" else []
+        if not seed:
+            return []
+
+        typ, data = c.uid("fetch", seed[0].decode(), "(X-GM-THRID)")
         thrid = None
         for item in data or []:
-            if isinstance(item, (bytes, bytearray)):
-                m = re.search(rb"X-GM-THRID (\d+)", item)
-                if m:
-                    thrid = m.group(1).decode()
-            elif isinstance(item, tuple):
-                m = re.search(rb"X-GM-THRID (\d+)", item[0])
+            line = item[0] if isinstance(item, tuple) else item
+            if isinstance(line, (bytes, bytearray)):
+                m = re.search(rb"X-GM-THRID (\d+)", line)
                 if m:
                     thrid = m.group(1).decode()
         if not thrid:
             return []
 
         typ, data = c.uid("search", None, "X-GM-THRID", thrid)
-        if typ != "OK" or not data or not data[0]:
+        if typ != "OK":
             return []
-        thread_uids = data[0].split()
-        envs: list[dict] = []
-        for u in thread_uids:
-            env = _fetch_envelope(c, all_mail, u)
-            if env:
-                envs.append(env)
-        envs.sort(key=lambda e: e.get("date_iso") or "")
-        return envs
+        envs = fetch_envelopes(c, all_mail, _uids(data))
+    envs.sort(key=lambda e: e.get("date_iso") or "")
+    return envs
+
+
+def _reference_criteria(message_ids: list[str]) -> list[str]:
+    """IMAP SEARCH tokens matching any message that is, or refers to, one of the ids."""
+    terms = [
+        ["HEADER", header, _quote(mid)]
+        for mid in message_ids
+        for header in ("Message-ID", "References", "In-Reply-To")
+    ]
+    tokens = terms[0]
+    for term in terms[1:]:
+        tokens = ["OR", *tokens, *term]
+    return tokens
 
 
 def get_thread_generic(
@@ -109,74 +107,49 @@ def get_thread_generic(
     uid: str | None,
     folder: str | None,
 ) -> list[dict]:
-    """BFS over the Message-ID / References graph across folders."""
+    """Breadth-first walk of the Message-ID / References graph across folders."""
     with account.imap() as c:
-        # Folders to search across — inbox + sent + (archive if any)
         candidates = ["INBOX"]
         for role in ("sent", "archive", "all", "drafts"):
             f = resolve_role(c, role)
             if f and f not in candidates:
                 candidates.append(f)
 
-        # Seed message-id
-        seed: str | None = message_id
+        seed = message_id
         if not seed and uid and folder:
-            c.select(quote_mailbox(folder), readonly=True)
-            typ, data = c.uid(
-                "fetch",
-                str(uid),
-                "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])",
-            )
-            for item in data or []:
-                if isinstance(item, tuple):
-                    msg = email.message_from_bytes(item[1], policy=policy.default)
-                    seed = (msg.get("Message-ID") or "").strip() or None
-                    break
+            seed = _seed_message_id(c, folder, uid)
         if not seed:
             return []
 
-        visited_ids: set[str] = set()
+        visited: set[str] = set()
         results: dict[tuple[str, str], dict] = {}
-        queue: list[str] = [seed]
-
-        while queue:
-            mid = queue.pop()
-            if mid in visited_ids:
-                continue
-            visited_ids.add(mid)
+        frontier = [seed]
+        for _ in range(_MAX_ROUNDS):
+            if not frontier:
+                break
+            visited.update(frontier)
+            discovered: list[str] = []
             for f in candidates:
                 typ, _ = c.select(quote_mailbox(f), readonly=True)
                 if typ != "OK":
                     continue
-                # Find messages whose Message-ID matches
-                for search_args in (
-                    ("HEADER", "Message-ID", mid),
-                    ("HEADER", "References", mid),
-                    ("HEADER", "In-Reply-To", mid),
-                ):
-                    typ, data = c.uid("search", None, *search_args)
-                    if typ != "OK" or not data or not data[0]:
-                        continue
-                    for u in data[0].split():
-                        env = _fetch_envelope(c, f, u)
-                        if not env:
-                            continue
-                        key = (f, env["uid"])
-                        if key in results:
-                            continue
-                        results[key] = env
-                        # Walk references outward
-                        for ref in env.get("references") or []:
-                            if ref not in visited_ids:
-                                queue.append(ref)
-                        if env.get("message_id") and env["message_id"] not in visited_ids:
-                            queue.append(env["message_id"])
-                        if env.get("in_reply_to") and env["in_reply_to"] not in visited_ids:
-                            queue.append(env["in_reply_to"])
+                matches: list[bytes] = []
+                for i in range(0, len(frontier), _SEARCH_CHUNK):
+                    criteria = _reference_criteria(frontier[i : i + _SEARCH_CHUNK])
+                    typ, data = c.uid("search", None, *criteria)
+                    if typ == "OK":
+                        matches += _uids(data)
+                new = list(dict.fromkeys(u for u in matches if (f, u.decode()) not in results))
+                for env in fetch_envelopes(c, f, new):
+                    results[(f, env["uid"])] = env
+                    for mid in (env.get("message_id"), env.get("in_reply_to"), *env.get("references", [])):
+                        if mid and mid not in visited and mid not in discovered:
+                            discovered.append(mid)
+            frontier = discovered
 
-        envs = list(results.values())
-        envs.sort(key=lambda e: e.get("date_iso") or "")
-        return envs
+    envs = list(results.values())
+    envs.sort(key=lambda e: e.get("date_iso") or "")
+    return envs
 
 
 def get_thread(
