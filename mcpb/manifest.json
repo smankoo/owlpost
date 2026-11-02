@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "owlpost",
   "display_name": "owlpost",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "IMAP/SMTP email for iCloud, Gmail, Proton Bridge and any provider: search, read, follow threads, send.",
   "long_description": "owlpost is an MCP server for real-world IMAP/SMTP mail. It handles provider quirks (iCloud BODY.PEEK fetches and CRLF APPEND, Gmail X-GM-THRID threads and auto-saved Sent, Proton Bridge STARTTLS with self-signed certs) and auto-discovers folders via SPECIAL-USE. Configure one or more accounts in an accounts.toml file (app passwords, environment variables or a password command).",
   "author": {

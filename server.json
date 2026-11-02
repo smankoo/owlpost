@@ -8,13 +8,13 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/smankoo/owlpost",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "owlpost",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -31,7 +31,7 @@
     },
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/smankoo/owlpost:0.2.1",
+      "identifier": "ghcr.io/smankoo/owlpost:0.3.0",
       "runtimeHint": "docker",
       "transport": {
         "type": "stdio"
